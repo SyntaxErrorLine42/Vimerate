@@ -8,25 +8,33 @@
 #include <string>
 #include <cmath>
 #include <shellapi.h> // Required for Shell_NotifyIcon
+#include <fstream>    // Required for file operations (INI)
+#include <sstream>    // Required for string stream manipulation
+#include <iomanip>    // Required for std::setw and std::setfill
 
 #pragma comment(lib, "gdiplus.lib")
 
 // --- Constants for System Tray Icon and Menu Items ---
-// Define a custom message for the notification icon
 #define WM_APP_NOTIFYICON (WM_APP + 1)
-// Define IDs for menu items
 #define IDM_EXIT        1001
 #define IDM_SETTINGS    1002
 // --- End Constants ---
 
-// --- New: Window Class Name for Settings Window ---
+// --- Constants and IDs for Settings Window Controls ---
 const wchar_t SETTINGS_CLASS_NAME[] = L"SettingsClass";
-// --- End New ---
+#define IDC_COLOR_LABEL     2001
+#define IDC_COLOR_HEX_EDIT  2002
+#define IDC_APPLY_BUTTON    2003
+const wchar_t SETTINGS_INI_FILE[] = L"GridOverlaySettings.ini";
+const wchar_t INI_SECTION[] = L"Settings";
+const wchar_t INI_KEY_CELL_COLOR[] = L"CellColor";
+// --- End Constants ---
 
 HWND            g_hGridWnd  = nullptr;
-// --- New: Global variable for the Settings window handle ---
 HWND            g_hSettingsWnd = nullptr;
-// --- End New ---
+
+// Global variable for the cell color (Default light blue with alpha)
+Gdiplus::Color  g_cellColor(128, 173, 216, 230);
 
 enum GridState  { HIDDEN, SHOW_ALL, WAIT_CLICK } g_state = HIDDEN;
 std::wstring    g_typed;
@@ -41,14 +49,19 @@ NOTIFYICONDATAW g_nid = {};
 
 // Forward declarations
 LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
-// --- New: Forward declaration for the Settings window procedure ---
 LRESULT CALLBACK SettingsWndProc(HWND, UINT, WPARAM, LPARAM);
-// --- End New ---
 void    GenerateCells();
 void    FilterCells();
 void    LayoutAndDraw(HWND, int, int);
 void    MoveToAndPrompt(Cell*);
 void    SimClick(DWORD);
+
+// Helper functions for color and settings persistence
+Gdiplus::Color HexToColor(const std::wstring& hex);
+std::wstring ColorToHex(const Gdiplus::Color& color);
+void LoadSettings();
+void SaveSettings();
+
 
 // Helper to draw a rounded rectangle with given brush
 void DrawRounded(Gdiplus::Graphics& g, const Gdiplus::RectF& r, Gdiplus::Brush* brush) {
@@ -71,9 +84,12 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
         return 1;
     }
 
+    // Load settings at startup
+    LoadSettings();
+
     // --- Register Main Grid Window Class ---
-    const wchar_t GRID_CLASS_NAME[] = L"GridClass"; // Renamed for clarity
-    WNDCLASSEXW wcGrid = {}; // Renamed for clarity
+    const wchar_t GRID_CLASS_NAME[] = L"GridClass";
+    WNDCLASSEXW wcGrid = {};
     wcGrid.cbSize = sizeof(wcGrid);
     wcGrid.style = CS_HREDRAW | CS_VREDRAW;
     wcGrid.lpfnWndProc = WndProc;
@@ -84,22 +100,22 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
     RegisterClassExW(&wcGrid);
     // --- End Register Main Grid Window Class ---
 
-    // --- New: Register Settings Window Class ---
+    // --- Register Settings Window Class ---
     WNDCLASSEXW wcSettings = {};
     wcSettings.cbSize = sizeof(wcSettings);
-    wcSettings.style = CS_HREDRAW | CS_VREDRAW; // Basic styles
-    wcSettings.lpfnWndProc = SettingsWndProc; // Use the new WndProc
+    wcSettings.style = CS_HREDRAW | CS_VREDRAW;
+    wcSettings.lpfnWndProc = SettingsWndProc;
     wcSettings.hInstance = hInst;
     wcSettings.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    wcSettings.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1); // Standard window background
+    wcSettings.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
     wcSettings.lpszClassName = SETTINGS_CLASS_NAME;
     RegisterClassExW(&wcSettings);
-    // --- End New ---
+    // --- End Register Settings Window Class ---
 
 
     g_hGridWnd = CreateWindowExW(
         WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_APPWINDOW,
-        GRID_CLASS_NAME, L"Grid Overlay", WS_POPUP, // Use GRID_CLASS_NAME
+        GRID_CLASS_NAME, L"Grid Overlay", WS_POPUP,
         0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN),
         nullptr, nullptr, hInst, nullptr
     );
@@ -109,14 +125,13 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
 
     // --- Tray Icon Initialization ---
     g_nid.cbSize = sizeof(NOTIFYICONDATAW);
-    g_nid.hWnd = g_hGridWnd; // Associate with our main window
+    g_nid.hWnd = g_hGridWnd;
     g_nid.uID = 1;
     g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     g_nid.uCallbackMessage = WM_APP_NOTIFYICON;
-    g_nid.hIcon = LoadIcon(nullptr, IDI_APPLICATION); // You can use a custom icon here
+    g_nid.hIcon = LoadIcon(nullptr, IDI_APPLICATION);
     wcscpy_s(g_nid.szTip, L"Grid Overlay");
 
-    // Add the icon to the system tray
     Shell_NotifyIconW(NIM_ADD, &g_nid);
     // --- End Tray Icon Initialization ---
 
@@ -128,6 +143,9 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
 
     UnregisterHotKey(g_hGridWnd, HOTKEY_ID);
     DestroyWindow(g_hGridWnd);
+
+    // Save settings before exiting
+    SaveSettings();
 
     // --- Delete Tray Icon before exiting ---
     Shell_NotifyIconW(NIM_DELETE, &g_nid);
@@ -154,68 +172,60 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
         }
         break;
 
-    // --- Handle Notification Icon Messages ---
     case WM_APP_NOTIFYICON:
         switch (LOWORD(lParam)) {
-        case WM_RBUTTONUP: // Right-click on the tray icon
+        case WM_RBUTTONUP:
         {
             POINT pt;
-            GetCursorPos(&pt); // Get current cursor position for menu placement
+            GetCursorPos(&pt);
 
             HMENU hMenu = CreatePopupMenu();
             if (hMenu) {
-                AppendMenuW(hMenu, MF_STRING, IDM_SETTINGS, L"S&ettings"); // Add "Settings" item
-                AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);             // Add a separator line
+                AppendMenuW(hMenu, MF_STRING, IDM_SETTINGS, L"S&ettings");
+                AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
 
-                AppendMenuW(hMenu, MF_STRING, IDM_EXIT, L"E&xit"); // Add "Exit" item
+                AppendMenuW(hMenu, MF_STRING, IDM_EXIT, L"E&xit");
                 SetMenuDefaultItem(hMenu, IDM_EXIT, FALSE);
 
-                SetForegroundWindow(hWnd); // Crucial for menu behavior
+                SetForegroundWindow(hWnd);
                 TrackPopupMenu(hMenu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, hWnd, nullptr);
-                PostMessage(hWnd, WM_NULL, 0, 0); // Release foreground status
+                PostMessage(hWnd, WM_NULL, 0, 0);
                 DestroyMenu(hMenu);
             }
         }
         break;
         }
-        break; // End of WM_APP_NOTIFYICON case
+        break;
 
-    // --- Handle Menu Commands (from tray icon or any other menu) ---
     case WM_COMMAND:
-        // Handle the "Settings" menu item
         if (LOWORD(wParam) == IDM_SETTINGS) {
-            // --- NEW: Open the Settings window ---
             if (g_hSettingsWnd == nullptr) {
-                // Create the window if it doesn't exist
                 g_hSettingsWnd = CreateWindowExW(
-                    0, // Optional window styles
-                    SETTINGS_CLASS_NAME, // Class name
-                    L"Settings", // Window title
-                    WS_OVERLAPPEDWINDOW, // Window style (resizable, title bar, min/max buttons)
-                    CW_USEDEFAULT, CW_USEDEFAULT, // Position
-                    400, 300, // Size (width, height)
-                    hWnd, // Parent window (optional, but good practice)
-                    nullptr, // Menu
-                    GetModuleHandle(nullptr), // Instance handle
-                    nullptr // Additional application data
+                    0,
+                    SETTINGS_CLASS_NAME,
+                    L"Settings",
+                    WS_OVERLAPPEDWINDOW,
+                    CW_USEDEFAULT, CW_USEDEFAULT,
+                    400, 300,
+                    hWnd,
+                    nullptr,
+                    GetModuleHandle(nullptr),
+                    nullptr
                 );
 
                 if (g_hSettingsWnd) {
-                    ShowWindow(g_hSettingsWnd, SW_SHOW); // Show the window
-                    UpdateWindow(g_hSettingsWnd);        // Paint the window
+                    ShowWindow(g_hSettingsWnd, SW_SHOW);
+                    UpdateWindow(g_hSettingsWnd);
                 }
             } else {
-                // If the window already exists, just bring it to the front
                 SetForegroundWindow(g_hSettingsWnd);
-                ShowWindow(g_hSettingsWnd, SW_RESTORE); // Ensure it's not minimized
+                ShowWindow(g_hSettingsWnd, SW_RESTORE);
             }
-            // --- End NEW ---
         }
-        // Handle the "Exit" menu item
         else if (LOWORD(wParam) == IDM_EXIT) {
-            DestroyWindow(hWnd); // This will send WM_DESTROY and lead to app exit
+            DestroyWindow(hWnd);
         }
-        break; // End of WM_COMMAND case
+        break;
 
     case WM_KEYDOWN: {
         if (g_state == HIDDEN)
@@ -269,12 +279,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
     }
 
     case WM_DESTROY:
-        // --- NEW: Close the settings window if it exists before exiting ---
         if (g_hSettingsWnd) {
             DestroyWindow(g_hSettingsWnd);
-            g_hSettingsWnd = nullptr; // Clear the handle
+            g_hSettingsWnd = nullptr;
         }
-        // --- End NEW ---
         PostQuitMessage(0);
         break;
 
@@ -284,32 +292,164 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
     return 0;
 }
 
-// --- NEW: Window Procedure for the Settings Window ---
+// Window Procedure for the Settings Window
 LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
+        case WM_CREATE:
+        {
+            // Create static label
+            CreateWindowW(
+                L"STATIC", L"Cell Color (Hex RRGGBB):",
+                WS_CHILD | WS_VISIBLE,
+                10, 10, 150, 20,
+                hWnd, (HMENU)IDC_COLOR_LABEL, GetModuleHandle(nullptr), nullptr
+            );
+
+            // Create edit control for hex input
+            HWND hEdit = CreateWindowW(
+                L"EDIT", ColorToHex(g_cellColor).c_str(), // Initialize with current color
+                WS_CHILD | WS_VISIBLE | WS_BORDER | ES_UPPERCASE | ES_NOHIDESEL, // Removed ES_AUTOHEX
+                170, 10, 100, 20,
+                hWnd, (HMENU)IDC_COLOR_HEX_EDIT, GetModuleHandle(nullptr), nullptr
+            );
+            // Limit text to 6 characters (RRGGBB)
+            SendMessage(hEdit, EM_SETLIMITTEXT, 6, 0);
+
+
+            // Create Apply button
+            CreateWindowW(
+                L"BUTTON", L"Apply",
+                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                280, 10, 80, 25,
+                hWnd, (HMENU)IDC_APPLY_BUTTON, GetModuleHandle(nullptr), nullptr
+            );
+        }
+        break;
+
+        case WM_COMMAND:
+            if (LOWORD(wParam) == IDC_APPLY_BUTTON) {
+                // Get text from the edit control
+                HWND hEdit = GetDlgItem(hWnd, IDC_COLOR_HEX_EDIT);
+                int textLength = GetWindowTextLength(hEdit);
+                if (textLength == 6) { // Check for exactly 6 characters
+                    std::wstring hexColor(textLength + 1, L'\0');
+                    GetWindowTextW(hEdit, &hexColor[0], textLength + 1);
+                    hexColor.resize(textLength); // Trim null terminator
+
+                    // Convert hex to color
+                    Gdiplus::Color newColor = HexToColor(hexColor);
+
+                    // Check if HexToColor returned a valid color (non-zero alpha from our helper)
+                    if (newColor.GetA() != 0) {
+                        // Keep the original alpha (128), only update RGB
+                        g_cellColor = Gdiplus::Color(g_cellColor.GetA(), newColor.GetR(), newColor.GetG(), newColor.GetB());
+
+                        // Trigger redraw of the main grid window
+                        if (g_hGridWnd) {
+                            InvalidateRect(g_hGridWnd, nullptr, TRUE);
+                            UpdateWindow(g_hGridWnd);
+                        }
+
+                        // Save the new setting immediately
+                        SaveSettings();
+                    } else {
+                         MessageBoxW(hWnd, L"Invalid hex color format. Please use RRGGBB (e.g., AADD22).", L"Input Error", MB_OK | MB_ICONWARNING);
+                    }
+                } else {
+                     MessageBoxW(hWnd, L"Invalid hex color format. Please use exactly 6 characters (RRGGBB).", L"Input Error", MB_OK | MB_ICONWARNING);
+                }
+            }
+            break;
+
         case WM_CLOSE:
-            // When the user clicks the close button on the settings window,
-            // hide it instead of destroying it. This allows us to reopen it later.
             ShowWindow(hWnd, SW_HIDE);
-            // Optional: Clear the global handle if you want to force recreation next time
-            // g_hSettingsWnd = nullptr; // Uncomment this if you want to recreate the window each time
-            return 0; // Indicate that we handled the message
+            return 0;
 
         case WM_DESTROY:
-            // This message is sent when DestroyWindow is explicitly called on this window.
-            // If we hide on WM_CLOSE, this case might not be reached unless the main
-            // window is destroyed first.
-            g_hSettingsWnd = nullptr; // Clear the global handle when the window is destroyed
-            break; // Let DefWindowProc handle the rest of WM_DESTROY
-
-        // Add other message handlers here for controls, drawing, etc. later
+            g_hSettingsWnd = nullptr;
+            break;
 
         default:
             return DefWindowProcW(hWnd, message, wParam, lParam);
     }
     return 0;
 }
-// --- End NEW ---
+
+
+// Helper functions for color conversion and settings persistence
+
+// Converts a hex string (RRGGBB) to a Gdiplus::Color (alpha is set to 255 for valid input)
+Gdiplus::Color HexToColor(const std::wstring& hex) {
+    std::wstring cleanHex = hex;
+    if (cleanHex.length() > 0 && cleanHex[0] == L'#') {
+        cleanHex = cleanHex.substr(1);
+    }
+
+    if (cleanHex.length() != 6) {
+        // Return transparent black for invalid input
+        return Gdiplus::Color(0, 0, 0, 0);
+    }
+
+    try {
+        unsigned int rgb = std::stoul(cleanHex, nullptr, 16);
+        BYTE r = (rgb >> 16) & 0xFF;
+        BYTE g = (rgb >> 8) & 0xFF;
+        BYTE b = rgb & 0xFF;
+        return Gdiplus::Color(255, r, g, b); // Return with full alpha for valid conversion
+    } catch (...) {
+        // Handle parsing errors
+        return Gdiplus::Color(0, 0, 0, 0); // Return transparent black on error
+    }
+}
+
+// Converts a Gdiplus::Color to a hex string (RRGGBB)
+std::wstring ColorToHex(const Gdiplus::Color& color) {
+    std::wstringstream ss;
+    ss << std::hex << std::uppercase << std::setfill(L'0');
+    ss << std::setw(2) << (int)color.GetR();
+    ss << std::setw(2) << (int)color.GetG();
+    ss << std::setw(2) << (int)color.GetB();
+    return ss.str();
+}
+
+// Loads settings from the INI file
+void LoadSettings() {
+    wchar_t hexColor[10]; // Buffer for the hex string (e.g., "AABBCC\0")
+    // GetPrivateProfileStringW(Section, Key, Default, Buffer, BufferSize, FilePath)
+    DWORD charsRead = GetPrivateProfileStringW(
+        INI_SECTION,
+        INI_KEY_CELL_COLOR,
+        L"ADDAE6", // Default hex for our light blue (173, 216, 230)
+        hexColor,
+        sizeof(hexColor) / sizeof(hexColor[0]),
+        SETTINGS_INI_FILE
+    );
+
+    // Convert loaded hex to color and update global variable
+    Gdiplus::Color loadedColor = HexToColor(hexColor);
+
+    // If HexToColor returns a valid color (non-zero alpha), use its RGB.
+    // We keep the original alpha (128) from the default color, only changing RGB.
+    if (loadedColor.GetA() != 0) {
+        g_cellColor = Gdiplus::Color(g_cellColor.GetA(), loadedColor.GetR(), loadedColor.GetG(), loadedColor.GetB());
+    }
+    // If the loaded hex was invalid, loadedColor.GetA() would be 0, and we'd stick
+    // with the initial g_cellColor (the default light blue or whatever was set initially).
+}
+
+// Saves current settings to the INI file
+void SaveSettings() {
+    // Convert the current RGB part of the color to hex
+    std::wstring hexColor = ColorToHex(g_cellColor);
+
+    // WritePrivateProfileStringW(Section, Key, Value, FilePath)
+    WritePrivateProfileStringW(
+        INI_SECTION,
+        INI_KEY_CELL_COLOR,
+        hexColor.c_str(),
+        SETTINGS_INI_FILE
+    );
+}
 
 
 // Generate cells with double columns, right side with dot inserted after first char
@@ -317,9 +457,6 @@ void GenerateCells() {
     g_cells.clear();
     int poolSize = (int)POOL.size();
 
-    // We split columns horizontally: left half is normal two-char labels,
-    // right half is first char + dot + second char
-    // Total columns = poolSize * 2
     for (int row = 0; row < poolSize; ++row) {
         wchar_t firstChar = POOL[row];
         for (int col = 0; col < poolSize; ++col) {
@@ -374,14 +511,16 @@ void LayoutAndDraw(HWND hWnd, int W, int H) {
     mg.SetSmoothingMode(SmoothingModeAntiAlias);
     mg.Clear(Color(0, 0, 0, 0));
 
-    SolidBrush blueBrush(Color(128, 173, 216, 230));
+    // Use the global cell color
+    SolidBrush cellBrush(g_cellColor);
+
     Font        font(L"Arial", 11, FontStyleBold);
-    SolidBrush    textBrush(Color(255, 0, 0, 0));
+    SolidBrush    textBrush(Color(255, 0, 0, 0)); // Text color remains black
 
     StringFormat sf;
     sf.SetAlignment(StringAlignmentCenter);
     sf.SetLineAlignment(StringAlignmentCenter);
-    sf.SetFormatFlags(StringFormatFlagsNoWrap);    // Prevent text wrapping
+    sf.SetFormatFlags(StringFormatFlagsNoWrap);
 
     int count = (int)g_filtered.size();
 
@@ -421,8 +560,6 @@ void LayoutAndDraw(HWND hWnd, int W, int H) {
                 c->rc = rc;
             }
             else {
-                // If a filtered label doesn't fit the 2 or 3 char pattern,
-                // give it an off-screen rectangle so it's not drawn.
                 RECT rc = { -100, -100, -90, -90 };
                 c->rc = rc;
             }
@@ -430,22 +567,21 @@ void LayoutAndDraw(HWND hWnd, int W, int H) {
     }
 
     for (auto c : g_filtered) {
-        // Only draw cells that have been given valid coordinates
         if (c->rc.left >= 0 && c->rc.top >= 0) {
             RECT rc = c->rc;
             RectF layoutRect((FLOAT)rc.left, (FLOAT)rc.top, (FLOAT)(rc.right - rc.left), (FLOAT)(rc.bottom - rc.top));
 
-            // Measure string with a very wide rectangle to get accurate width without wrapping
             RectF unlimitedRect(0, 0, 1000, layoutRect.Height);
             RectF textBounds;
             mg.MeasureString(c->lbl.c_str(), -1, &font, unlimitedRect, &textBounds);
 
-            // Center the box rect inside the cell, make it wide enough to fit text on one line
             float bx = layoutRect.X + (layoutRect.Width - textBounds.Width) / 2 - 1;
             float by = layoutRect.Y + (layoutRect.Height - textBounds.Height) / 2 - 1;
             RectF boxRect(bx, by, textBounds.Width + 2, textBounds.Height + 2);
 
-            DrawRounded(mg, boxRect, &blueBrush);
+            // Use the global cell brush
+            DrawRounded(mg, boxRect, &cellBrush);
+
             mg.DrawString(c->lbl.c_str(), -1, &font, boxRect, &sf, &textBrush);
         }
     }
@@ -462,16 +598,15 @@ void LayoutAndDraw(HWND hWnd, int W, int H) {
         int px = rc.right + promptMargin;
         int py = rc.top + ((rc.bottom - rc.top) / 2) - (promptHeight / 2);
 
-        // Adjust prompt position if it goes off-screen
         if (px + promptWidth > W) {
             px = rc.left - promptWidth - promptMargin;
-            if (px < 0) px = 0; // If it still goes off left, align to left edge
+            if (px < 0) px = 0;
         }
-        if (py < 0) py = 0; // If it goes off top, align to top edge
-        if (py + promptHeight > H) py = H - promptHeight; // If it goes off bottom, align to bottom edge
+        if (py < 0) py = 0;
+        if (py + promptHeight > H) py = H - promptHeight;
 
         RectF promptRect((REAL)px, (REAL)py, (REAL)promptWidth, (REAL)promptHeight);
-        SolidBrush promptBg(Color(255, 173, 216, 230));
+        SolidBrush promptBg(Color(255, 173, 216, 230)); // Prompt background remains fixed
         SolidBrush promptTextBrush(Color(255, 0, 0, 0));
 
         DrawRounded(mg, promptRect, &promptBg);
@@ -482,7 +617,7 @@ void LayoutAndDraw(HWND hWnd, int W, int H) {
         promptFormat.SetLineAlignment(StringAlignmentCenter);
 
         RectF promptTextRect = promptRect;
-        promptTextRect.X += 6; // Add some padding inside the prompt box
+        promptTextRect.X += 6;
 
         mg.DrawString(promptText.c_str(), -1, &promptFont, promptTextRect, &promptFormat, &promptTextBrush);
     }
