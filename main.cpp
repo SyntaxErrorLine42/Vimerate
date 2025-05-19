@@ -132,7 +132,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
         GetKeyboardState(kbState);
         wchar_t buf[2];
         int result = ToUnicode((UINT)wParam, HIWORD(lParam), kbState, buf, 1, 0);
-        if (result == 1 && POOL.find(buf[0]) != std::wstring::npos) {
+        if (result == 1 && (POOL.find(buf[0]) != std::wstring::npos || buf[0] == L'.')) {
             g_typed += buf[0];
             FilterCells();
             if (g_typed.length() == 2 || g_typed.length() == 3) {
