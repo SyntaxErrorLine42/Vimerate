@@ -312,7 +312,7 @@ void LayoutAndDraw(HWND hWnd, int W, int H) {
         if (py + promptHeight > H) py = H - promptHeight;
 
         RectF promptRect((REAL)px, (REAL)py, (REAL)promptWidth, (REAL)promptHeight);
-        SolidBrush promptBg(Color(128, 173, 216, 230));
+        SolidBrush promptBg(Color(255, 173, 216, 230));
         SolidBrush promptTextBrush(Color(255, 0, 0, 0));
 
         DrawRounded(mg, promptRect, &promptBg);
@@ -346,6 +346,8 @@ void MoveToAndPrompt(Cell* c) {
     int y = (c->rc.top + c->rc.bottom) / 2;
     SetCursorPos(x, y);
     ShowWindow(g_hGridWnd, SW_SHOW);
+    FilterCells();
+    LayoutAndDraw(g_hGridWnd, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
     InvalidateRect(g_hGridWnd, nullptr, TRUE);
     UpdateWindow(g_hGridWnd);
 }
