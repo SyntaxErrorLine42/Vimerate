@@ -16,10 +16,18 @@
 #define WM_APP_NOTIFYICON (WM_APP + 1)
 // Define IDs for menu items
 #define IDM_EXIT        1001
-#define IDM_SETTINGS    1002 // <-- NEW: ID for the Settings menu item
+#define IDM_SETTINGS    1002
 // --- End Constants ---
 
+// --- New: Window Class Name for Settings Window ---
+const wchar_t SETTINGS_CLASS_NAME[] = L"SettingsClass";
+// --- End New ---
+
 HWND            g_hGridWnd  = nullptr;
+// --- New: Global variable for the Settings window handle ---
+HWND            g_hSettingsWnd = nullptr;
+// --- End New ---
+
 enum GridState  { HIDDEN, SHOW_ALL, WAIT_CLICK } g_state = HIDDEN;
 std::wstring    g_typed;
 struct Cell { std::wstring lbl; RECT rc; };
@@ -33,6 +41,9 @@ NOTIFYICONDATAW g_nid = {};
 
 // Forward declarations
 LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
+// --- New: Forward declaration for the Settings window procedure ---
+LRESULT CALLBACK SettingsWndProc(HWND, UINT, WPARAM, LPARAM);
+// --- End New ---
 void    GenerateCells();
 void    FilterCells();
 void    LayoutAndDraw(HWND, int, int);
@@ -60,20 +71,35 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
         return 1;
     }
 
-    const wchar_t CLASS_NAME[] = L"GridClass";
-    WNDCLASSEXW wc = {};
-    wc.cbSize = sizeof(wc);
-    wc.style = CS_HREDRAW | CS_VREDRAW;
-    wc.lpfnWndProc = WndProc;
-    wc.hInstance = hInst;
-    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    wc.hbrBackground = (HBRUSH)GetStockObject(NULL_BRUSH);
-    wc.lpszClassName = CLASS_NAME;
-    RegisterClassExW(&wc);
+    // --- Register Main Grid Window Class ---
+    const wchar_t GRID_CLASS_NAME[] = L"GridClass"; // Renamed for clarity
+    WNDCLASSEXW wcGrid = {}; // Renamed for clarity
+    wcGrid.cbSize = sizeof(wcGrid);
+    wcGrid.style = CS_HREDRAW | CS_VREDRAW;
+    wcGrid.lpfnWndProc = WndProc;
+    wcGrid.hInstance = hInst;
+    wcGrid.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wcGrid.hbrBackground = (HBRUSH)GetStockObject(NULL_BRUSH);
+    wcGrid.lpszClassName = GRID_CLASS_NAME;
+    RegisterClassExW(&wcGrid);
+    // --- End Register Main Grid Window Class ---
+
+    // --- New: Register Settings Window Class ---
+    WNDCLASSEXW wcSettings = {};
+    wcSettings.cbSize = sizeof(wcSettings);
+    wcSettings.style = CS_HREDRAW | CS_VREDRAW; // Basic styles
+    wcSettings.lpfnWndProc = SettingsWndProc; // Use the new WndProc
+    wcSettings.hInstance = hInst;
+    wcSettings.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wcSettings.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1); // Standard window background
+    wcSettings.lpszClassName = SETTINGS_CLASS_NAME;
+    RegisterClassExW(&wcSettings);
+    // --- End New ---
+
 
     g_hGridWnd = CreateWindowExW(
         WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_APPWINDOW,
-        CLASS_NAME, L"Grid Overlay", WS_POPUP,
+        GRID_CLASS_NAME, L"Grid Overlay", WS_POPUP, // Use GRID_CLASS_NAME
         0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN),
         nullptr, nullptr, hInst, nullptr
     );
@@ -83,7 +109,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
 
     // --- Tray Icon Initialization ---
     g_nid.cbSize = sizeof(NOTIFYICONDATAW);
-    g_nid.hWnd = g_hGridWnd;
+    g_nid.hWnd = g_hGridWnd; // Associate with our main window
     g_nid.uID = 1;
     g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     g_nid.uCallbackMessage = WM_APP_NOTIFYICON;
@@ -138,26 +164,16 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
 
             HMENU hMenu = CreatePopupMenu();
             if (hMenu) {
-                // --- NEW: Add "Settings" button and separator ---
                 AppendMenuW(hMenu, MF_STRING, IDM_SETTINGS, L"S&ettings"); // Add "Settings" item
                 AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);             // Add a separator line
-                // --- End NEW ---
 
                 AppendMenuW(hMenu, MF_STRING, IDM_EXIT, L"E&xit"); // Add "Exit" item
                 SetMenuDefaultItem(hMenu, IDM_EXIT, FALSE);
 
-                // Make the window the foreground window to receive menu messages.
-                // This is crucial for the menu to disappear correctly when clicked away.
-                SetForegroundWindow(hWnd);
-
-                // Display the menu
+                SetForegroundWindow(hWnd); // Crucial for menu behavior
                 TrackPopupMenu(hMenu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, hWnd, nullptr);
-
-                // Post a dummy message to release the foreground window status.
-                // This is a common practice after TrackPopupMenu.
-                PostMessage(hWnd, WM_NULL, 0, 0);
-
-                DestroyMenu(hMenu); // Clean up the menu
+                PostMessage(hWnd, WM_NULL, 0, 0); // Release foreground status
+                DestroyMenu(hMenu);
             }
         }
         break;
@@ -168,13 +184,35 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
     case WM_COMMAND:
         // Handle the "Settings" menu item
         if (LOWORD(wParam) == IDM_SETTINGS) {
-            // --- Placeholder for Settings functionality ---
-            MessageBoxW(hWnd, L"Settings button clicked!", L"Settings", MB_OK | MB_ICONINFORMATION);
-            // You will replace the above MessageBox with your actual settings dialog code later.
+            // --- NEW: Open the Settings window ---
+            if (g_hSettingsWnd == nullptr) {
+                // Create the window if it doesn't exist
+                g_hSettingsWnd = CreateWindowExW(
+                    0, // Optional window styles
+                    SETTINGS_CLASS_NAME, // Class name
+                    L"Settings", // Window title
+                    WS_OVERLAPPEDWINDOW, // Window style (resizable, title bar, min/max buttons)
+                    CW_USEDEFAULT, CW_USEDEFAULT, // Position
+                    400, 300, // Size (width, height)
+                    hWnd, // Parent window (optional, but good practice)
+                    nullptr, // Menu
+                    GetModuleHandle(nullptr), // Instance handle
+                    nullptr // Additional application data
+                );
+
+                if (g_hSettingsWnd) {
+                    ShowWindow(g_hSettingsWnd, SW_SHOW); // Show the window
+                    UpdateWindow(g_hSettingsWnd);        // Paint the window
+                }
+            } else {
+                // If the window already exists, just bring it to the front
+                SetForegroundWindow(g_hSettingsWnd);
+                ShowWindow(g_hSettingsWnd, SW_RESTORE); // Ensure it's not minimized
+            }
+            // --- End NEW ---
         }
         // Handle the "Exit" menu item
         else if (LOWORD(wParam) == IDM_EXIT) {
-            // User clicked "Exit" from the tray icon menu
             DestroyWindow(hWnd); // This will send WM_DESTROY and lead to app exit
         }
         break; // End of WM_COMMAND case
@@ -231,6 +269,12 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
     }
 
     case WM_DESTROY:
+        // --- NEW: Close the settings window if it exists before exiting ---
+        if (g_hSettingsWnd) {
+            DestroyWindow(g_hSettingsWnd);
+            g_hSettingsWnd = nullptr; // Clear the handle
+        }
+        // --- End NEW ---
         PostQuitMessage(0);
         break;
 
@@ -239,6 +283,34 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
     }
     return 0;
 }
+
+// --- NEW: Window Procedure for the Settings Window ---
+LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    switch (message) {
+        case WM_CLOSE:
+            // When the user clicks the close button on the settings window,
+            // hide it instead of destroying it. This allows us to reopen it later.
+            ShowWindow(hWnd, SW_HIDE);
+            // Optional: Clear the global handle if you want to force recreation next time
+            // g_hSettingsWnd = nullptr; // Uncomment this if you want to recreate the window each time
+            return 0; // Indicate that we handled the message
+
+        case WM_DESTROY:
+            // This message is sent when DestroyWindow is explicitly called on this window.
+            // If we hide on WM_CLOSE, this case might not be reached unless the main
+            // window is destroyed first.
+            g_hSettingsWnd = nullptr; // Clear the global handle when the window is destroyed
+            break; // Let DefWindowProc handle the rest of WM_DESTROY
+
+        // Add other message handlers here for controls, drawing, etc. later
+
+        default:
+            return DefWindowProcW(hWnd, message, wParam, lParam);
+    }
+    return 0;
+}
+// --- End NEW ---
+
 
 // Generate cells with double columns, right side with dot inserted after first char
 void GenerateCells() {
