@@ -8,21 +8,22 @@
 #include <string>
 #include <cmath>
 #include <shellapi.h> // Required for Shell_NotifyIcon
-#include <fstream>      // Required for file operations (INI)
-#include <sstream>      // Required for string stream manipulation
-#include <iomanip>      // Required for std::setw and std::setfill
-#include <commdlg.h>    // Required for ChooseColor
-#include <shlobj.h>     // Still included for general utility
-#include <commctrl.h>   // Required for trackbar control (INITCOMMONCONTROLSEX)
+#include <fstream>    // Required for file operations (INI)
+#include <sstream>    // Required for string stream manipulation
+#include <iomanip>    // Required for std::setw and std::setfill
+#include <commdlg.h>  // Required for ChooseColor
+#include <shlobj.h>   // Still included for general utility
+#include <commctrl.h> // Required for trackbar control (INITCOMMONCONTROLSEX), and also for combobox styles
+#include <algorithm>  // Required for std::sort and std::unique
 
 #pragma comment(lib, "gdiplus.lib")
-#pragma comment(lib, "Shell32.lib") 
-#pragma comment(lib, "ComCtl32.lib") // Link with ComCtl32.lib for trackbar
+#pragma comment(lib, "Shell32.lib")
+#pragma comment(lib, "ComCtl32.lib") // Link with ComCtl32.lib for trackbar and comboboxes
 
 // --- Constants for System Tray Icon and Menu Items ---
 #define WM_APP_NOTIFYICON (WM_APP + 1)
-#define IDM_EXIT        1001
-#define IDM_SETTINGS    1002
+#define IDM_EXIT          1001
+#define IDM_SETTINGS      1002
 // --- End Constants ---
 
 // --- Constants and IDs for Settings Window Controls ---
@@ -31,15 +32,25 @@ const wchar_t SETTINGS_CLASS_NAME[] = L"SettingsClass";
 #define IDC_CHOOSE_COLOR_BUTTON 2003
 #define IDC_POOL_SIZE_LABEL     2004
 #define IDC_POOL_SIZE_SLIDER    2005
-#define IDC_POOL_SIZE_VALUE_LABEL 2006 
+#define IDC_POOL_SIZE_VALUE_LABEL 2006
 #define IDC_RESET_BUTTON        2007 // New ID for the Reset Button
+
+// Hotkey Control IDs
+#define IDC_HOTKEY_MOD1_COMBO   2008
+#define IDC_HOTKEY_MOD2_COMBO   2009
+#define IDC_HOTKEY_VKEY_COMBO   2010
+#define IDC_HOTKEY_DISPLAY_LABEL 2011 // Label to show the effective hotkey
 
 const wchar_t INI_SECTION[] = L"Settings";
 const wchar_t INI_KEY_CELL_COLOR[] = L"CellColor";
-const wchar_t INI_KEY_POOL_SIZE[] = L"PoolSize"; 
+const wchar_t INI_KEY_POOL_SIZE[] = L"PoolSize";
+// New INI keys for hotkey settings
+const wchar_t INI_KEY_HOTKEY_MOD1[] = L"HotkeyMod1";
+const wchar_t INI_KEY_HOTKEY_MOD2[] = L"HotkeyMod2";
+const wchar_t INI_KEY_HOTKEY_VKEY[] = L"HotkeyVKey";
 // --- End Constants ---
 
-HWND            g_hGridWnd  = nullptr;
+HWND            g_hGridWnd = nullptr;
 HWND            g_hSettingsWnd = nullptr;
 
 // Global variable for the cell color (Default light blue with alpha)
@@ -47,6 +58,16 @@ Gdiplus::Color  g_cellColor(128, 173, 216, 230); // Alpha is 128 (half-transpare
 // Default values for settings
 const Gdiplus::Color DEFAULT_CELL_COLOR(128, 173, 216, 230); // Same as initial g_cellColor
 const int DEFAULT_POOL_SIZE = 36; // Full POOL.length()
+
+// Global hotkey variables
+UINT g_hotkeyMod1 = MOD_WIN;    // Default: Win
+UINT g_hotkeyMod2 = MOD_SHIFT;  // Default: Shift
+UINT g_hotkeyVKey = 'Z';        // Default: 'Z'
+
+// Default hotkey constants
+const UINT DEFAULT_HOTKEY_MOD1 = MOD_WIN;
+const UINT DEFAULT_HOTKEY_MOD2 = MOD_SHIFT;
+const UINT DEFAULT_HOTKEY_VKEY = 'Z';
 
 enum GridState  { HIDDEN, SHOW_ALL, WAIT_CLICK } g_state = HIDDEN;
 std::wstring    g_typed;
@@ -57,7 +78,7 @@ const UINT      HOTKEY_ID   = 1;
 const std::wstring POOL     = L"abcdefghijklmnopqrstuvwxyz0123456789";
 
 // New global variable for the pool size, initialized to full pool
-int             g_poolSize = (int)POOL.length(); 
+int              g_poolSize = (int)POOL.length();
 const int MIN_POOL_SIZE = 6; // Minimum characters (a-f)
 
 // Global variable for the notification icon data
@@ -76,6 +97,11 @@ void    LayoutAndDraw(HWND, int, int);
 void    MoveToAndPrompt(Cell*);
 void    SimClick(DWORD);
 void    UpdatePoolSizeDisplay(HWND hSettingsWnd); // New helper
+void    UpdateHotkeyDisplay(HWND hSettingsWnd); // New helper
+void    PopulateHotkeyDropdowns(HWND hSettingsWnd); // New helper
+bool    RegisterAppHotkey(); // Helper to register the current hotkey (returns bool now)
+void    UnregisterAppHotkey(); // Helper to unregister the current hotkey
+
 
 // Helper functions for color and settings persistence
 Gdiplus::Color HexToColor(const std::wstring& hex);
@@ -99,10 +125,10 @@ void DrawRounded(Gdiplus::Graphics& g, const Gdiplus::RectF& r, Gdiplus::Brush* 
 }
 
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
-    // Initialize Common Controls for Trackbar
+    // Initialize Common Controls for Trackbar and Comboboxes
     INITCOMMONCONTROLSEX icc;
     icc.dwSize = sizeof(icc);
-    icc.dwICC = ICC_BAR_CLASSES; // Trackbar control class
+    icc.dwICC = ICC_BAR_CLASSES | ICC_STANDARD_CLASSES; // Trackbar and Combobox classes
     InitCommonControlsEx(&icc);
 
     Gdiplus::GdiplusStartupInput gdiplusInput;
@@ -122,13 +148,13 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
     if (lastSlash != std::wstring::npos) {
         exeDir = sExePath.substr(0, lastSlash);
     } else {
-        exeDir = L"."; 
+        exeDir = L".";
     }
 
     g_iniFilePath = exeDir;
-    g_iniFilePath += L"\\Settings"; 
-    CreateDirectoryW(g_iniFilePath.c_str(), nullptr); 
-    g_iniFilePath += L"\\GridOverlaySettings.ini"; 
+    g_iniFilePath += L"\\Settings";
+    CreateDirectoryW(g_iniFilePath.c_str(), nullptr);
+    g_iniFilePath += L"\\GridOverlaySettings.ini";
     // --- End custom settings path determination ---
 
     // Load settings at startup
@@ -162,13 +188,13 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
 
     g_hGridWnd = CreateWindowExW(
         WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_APPWINDOW,
-        GRID_CLASS_NAME, L"Grid Overlay", WS_POPUP,
+        GRID_CLASS_NAME, L"Vimerate", WS_POPUP,
         0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN),
         nullptr, nullptr, hInst, nullptr
     );
 
     GenerateCells(); // Generate cells initially based on loaded settings
-    RegisterHotKey(g_hGridWnd, HOTKEY_ID, MOD_WIN | MOD_SHIFT, 'Z');
+    RegisterAppHotkey(); // Register the hotkey loaded from settings
 
     // --- Tray Icon Initialization ---
     g_nid.cbSize = sizeof(NOTIFYICONDATAW);
@@ -177,7 +203,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
     g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     g_nid.uCallbackMessage = WM_APP_NOTIFYICON;
     g_nid.hIcon = LoadIcon(nullptr, IDI_APPLICATION);
-    wcscpy_s(g_nid.szTip, L"Grid Overlay");
+    wcscpy_s(g_nid.szTip, L"Vimerate");
 
     Shell_NotifyIconW(NIM_ADD, &g_nid);
     // --- End Tray Icon Initialization ---
@@ -188,7 +214,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
         DispatchMessageW(&msg);
     }
 
-    UnregisterHotKey(g_hGridWnd, HOTKEY_ID);
+    UnregisterAppHotkey(); // Unregister hotkey before exit
     DestroyWindow(g_hGridWnd);
 
     // Save settings before exiting
@@ -201,6 +227,31 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
     Gdiplus::GdiplusShutdown(token);
     return 0;
 }
+
+// Helper to register the application's hotkey
+bool RegisterAppHotkey() { // Now returns bool
+    // Combine modifiers: Win + Shift + Ctrl + Alt
+    UINT combinedModifiers = 0;
+    if (g_hotkeyMod1 == MOD_WIN || g_hotkeyMod2 == MOD_WIN) combinedModifiers |= MOD_WIN;
+    if (g_hotkeyMod1 == MOD_CONTROL || g_hotkeyMod2 == MOD_CONTROL) combinedModifiers |= MOD_CONTROL;
+    if (g_hotkeyMod1 == MOD_SHIFT || g_hotkeyMod2 == MOD_SHIFT) combinedModifiers |= MOD_SHIFT;
+    if (g_hotkeyMod1 == MOD_ALT || g_hotkeyMod2 == MOD_ALT) combinedModifiers |= MOD_ALT;
+
+    // g_hotkeyVKey will always be non-zero from UI selection and initial load (due to DEFAULT_HOTKEY_VKEY)
+    if (g_hotkeyVKey != 0) {
+        if (!RegisterHotKey(g_hGridWnd, HOTKEY_ID, combinedModifiers, g_hotkeyVKey)) {
+            MessageBoxW(g_hGridWnd, L"Failed to register hotkey. It might be in use by another application.", L"Hotkey Warning", MB_OK | MB_ICONWARNING);
+            return false; // Indicate failure
+        }
+    }
+    return true; // Indicate success (or that no key was intended to be registered, which is less likely now)
+}
+
+// Helper to unregister the application's hotkey
+void UnregisterAppHotkey() {
+    UnregisterHotKey(g_hGridWnd, HOTKEY_ID);
+}
+
 
 LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
@@ -250,10 +301,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                 g_hSettingsWnd = CreateWindowExW(
                     0,
                     SETTINGS_CLASS_NAME,
-                    L"Grid Overlay Settings",
-                    WS_OVERLAPPEDWINDOW | WS_VISIBLE, 
+                    L"Vimerate Settings",
+                    WS_OVERLAPPEDWINDOW | WS_VISIBLE,
                     CW_USEDEFAULT, CW_USEDEFAULT,
-                    400, 230, // Adjusted initial size to accommodate new button
+                    450, 350, // Adjusted initial size to accommodate new controls
                     hWnd,
                     nullptr,
                     GetModuleHandle(nullptr),
@@ -348,6 +399,185 @@ void UpdatePoolSizeDisplay(HWND hSettingsWnd) {
     }
 }
 
+// Helper to update the text label for hotkey display
+void UpdateHotkeyDisplay(HWND hSettingsWnd) {
+    HWND hLabel = GetDlgItem(hSettingsWnd, IDC_HOTKEY_DISPLAY_LABEL);
+    if (hLabel) {
+        std::wstring hotkeyString;
+        std::vector<std::wstring> activeModifiers;
+
+        // Collect active modifiers
+        if (g_hotkeyMod1 == MOD_WIN || g_hotkeyMod2 == MOD_WIN) activeModifiers.push_back(L"Win");
+        if (g_hotkeyMod1 == MOD_CONTROL || g_hotkeyMod2 == MOD_CONTROL) activeModifiers.push_back(L"Ctrl");
+        if (g_hotkeyMod1 == MOD_SHIFT || g_hotkeyMod2 == MOD_SHIFT) activeModifiers.push_back(L"Shift");
+        if (g_hotkeyMod1 == MOD_ALT || g_hotkeyMod2 == MOD_ALT) activeModifiers.push_back(L"Alt");
+
+        // Remove duplicates and sort for consistent display
+        std::sort(activeModifiers.begin(), activeModifiers.end());
+        activeModifiers.erase(std::unique(activeModifiers.begin(), activeModifiers.end()), activeModifiers.end());
+
+        // Append modifiers to hotkeyString
+        for (size_t i = 0; i < activeModifiers.size(); ++i) {
+            hotkeyString += activeModifiers[i];
+            if (i < activeModifiers.size() - 1) {
+                hotkeyString += L" + ";
+            }
+        }
+
+        // Append Virtual Key if it's not "None" (i.e., g_hotkeyVKey is not 0)
+        // Since we removed "None" from the VKey options, g_hotkeyVKey should generally be non-zero
+        // when set via the UI. However, if a previously saved "None" (0) VKey was loaded,
+        // it would be handled here by simply not appending anything.
+        if (g_hotkeyVKey != 0) {
+            // Add " + " only if there were modifiers already
+            if (!hotkeyString.empty()) {
+                hotkeyString += L" + ";
+            }
+
+            UINT scanCode = MapVirtualKeyW(g_hotkeyVKey, 0);
+            wchar_t keyName[256];
+            // GetKeyNameTextW returns the string representation of the key for the current keyboard layout.
+            // (scanCode << 16) is required for the lParam.
+            if (GetKeyNameTextW(scanCode << 16, keyName, sizeof(keyName) / sizeof(keyName[0]))) {
+                hotkeyString += keyName;
+            } else {
+                // Fallback for character keys that GetKeyNameTextW might not map cleanly
+                if (g_hotkeyVKey >= 'A' && g_hotkeyVKey <= 'Z' || g_hotkeyVKey >= '0' && g_hotkeyVKey <= '9') {
+                    hotkeyString += (wchar_t)g_hotkeyVKey;
+                } else {
+                    // For other VKEYs not explicitly handled by GetKeyNameTextW,
+                    // this will show its VKey code, e.g., "VKey_45"
+                    std::wstringstream ss;
+                    ss << L"VKey_" << g_hotkeyVKey;
+                    hotkeyString += ss.str();
+                }
+            }
+        }
+        // If g_hotkeyVKey is 0 (e.g., from loading an old setting), nothing is appended for the VKey,
+        // which matches the user's desire for a blank display for "None" VKey.
+
+        SetWindowTextW(hLabel, (L"Current Hotkey: " + hotkeyString).c_str());
+    }
+}
+
+// Helper to populate the hotkey dropdowns
+void PopulateHotkeyDropdowns(HWND hSettingsWnd) {
+    HWND hMod1Combo = GetDlgItem(hSettingsWnd, IDC_HOTKEY_MOD1_COMBO);
+    HWND hMod2Combo = GetDlgItem(hSettingsWnd, IDC_HOTKEY_MOD2_COMBO);
+    HWND hVKeyCombo = GetDlgItem(hSettingsWnd, IDC_HOTKEY_VKEY_COMBO);
+
+    // Clear existing items in case of re-population (e.g., after reset)
+    SendMessageW(hMod1Combo, CB_RESETCONTENT, 0, 0);
+    SendMessageW(hMod2Combo, CB_RESETCONTENT, 0, 0);
+    SendMessageW(hVKeyCombo, CB_RESETCONTENT, 0, 0);
+
+    // Populate Modifiers (with "None" option)
+    struct {
+        const wchar_t* name;
+        UINT value;
+    } modifiers[] = {
+        {L"None", 0},
+        {L"Win", MOD_WIN},
+        {L"Ctrl", MOD_CONTROL},
+        {L"Shift", MOD_SHIFT},
+        {L"Alt", MOD_ALT}
+    };
+
+    for (const auto& mod : modifiers) {
+        int index = (int)SendMessageW(hMod1Combo, CB_ADDSTRING, 0, (LPARAM)mod.name);
+        SendMessageW(hMod1Combo, CB_SETITEMDATA, index, (LPARAM)mod.value);
+        index = (int)SendMessageW(hMod2Combo, CB_ADDSTRING, 0, (LPARAM)mod.name);
+        SendMessageW(hMod2Combo, CB_SETITEMDATA, index, (LPARAM)mod.value);
+    }
+
+    // Select current modifiers
+    int selectedIndex = 0;
+    for (int i = 0; i < _countof(modifiers); ++i) {
+        if (modifiers[i].value == g_hotkeyMod1) {
+            selectedIndex = i;
+            break;
+        }
+    }
+    SendMessageW(hMod1Combo, CB_SETCURSEL, selectedIndex, 0);
+
+    selectedIndex = 0;
+    for (int i = 0; i < _countof(modifiers); ++i) {
+        if (modifiers[i].value == g_hotkeyMod2) {
+            selectedIndex = i;
+            break;
+        }
+    }
+    SendMessageW(hMod2Combo, CB_SETCURSEL, selectedIndex, 0);
+
+
+    // Populate Virtual Keys (WITHOUT "None" option)
+    // Store std::wstring directly to ensure proper memory management
+    std::vector<std::pair<std::wstring, UINT>> vkeys_data;
+    // Removed: vkeys_data.push_back({L"None", 0});
+
+    for (wchar_t c = 'A'; c <= 'Z'; ++c) vkeys_data.push_back({std::wstring(1, c), c});
+    for (wchar_t c = '0'; c <= '9'; ++c) vkeys_data.push_back({std::wstring(1, c), c});
+    for (int i = 1; i <= 12; ++i) {
+        std::wstringstream ss;
+        ss << L"F" << i;
+        vkeys_data.push_back({ss.str(), VK_F1 + (i - 1)});
+    }
+    vkeys_data.push_back({L"Space", VK_SPACE});
+    vkeys_data.push_back({L"Enter", VK_RETURN});
+    vkeys_data.push_back({L"Backspace", VK_BACK});
+    vkeys_data.push_back({L"Delete", VK_DELETE});
+    vkeys_data.push_back({L"Insert", VK_INSERT});
+    vkeys_data.push_back({L"Home", VK_HOME});
+    vkeys_data.push_back({L"End", VK_END});
+    vkeys_data.push_back({L"Page Up", VK_PRIOR});
+    vkeys_data.push_back({L"Page Down", VK_NEXT});
+    vkeys_data.push_back({L"Tab", VK_TAB});
+    vkeys_data.push_back({L"Escape", VK_ESCAPE});
+    vkeys_data.push_back({L"Num Lock", VK_NUMLOCK});
+    vkeys_data.push_back({L"Scroll Lock", VK_SCROLL});
+    vkeys_data.push_back({L"Print Screen", VK_SNAPSHOT});
+    vkeys_data.push_back({L"Pause", VK_PAUSE});
+    vkeys_data.push_back({L"Up Arrow", VK_UP});
+    vkeys_data.push_back({L"Down Arrow", VK_DOWN});
+    vkeys_data.push_back({L"Left Arrow", VK_LEFT});
+    vkeys_data.push_back({L"Right Arrow", VK_RIGHT});
+    vkeys_data.push_back({L"Numpad 0", VK_NUMPAD0});
+    vkeys_data.push_back({L"Numpad 1", VK_NUMPAD1});
+    vkeys_data.push_back({L"Numpad 2", VK_NUMPAD2});
+    vkeys_data.push_back({L"Numpad 3", VK_NUMPAD3});
+    vkeys_data.push_back({L"Numpad 4", VK_NUMPAD4});
+    vkeys_data.push_back({L"Numpad 5", VK_NUMPAD5});
+    vkeys_data.push_back({L"Numpad 6", VK_NUMPAD6});
+    vkeys_data.push_back({L"Numpad 7", VK_NUMPAD7});
+    vkeys_data.push_back({L"Numpad 8", VK_NUMPAD8});
+    vkeys_data.push_back({L"Numpad 9", VK_NUMPAD9});
+    vkeys_data.push_back({L"Numpad *", VK_MULTIPLY});
+    vkeys_data.push_back({L"Numpad +", VK_ADD});
+    vkeys_data.push_back({L"Numpad -", VK_SUBTRACT});
+    vkeys_data.push_back({L"Numpad .", VK_DECIMAL});
+    vkeys_data.push_back({L"Numpad /", VK_DIVIDE});
+
+
+    for (const auto& vk : vkeys_data) {
+        // Pass the C-style string from the wstring object
+        int index = (int)SendMessageW(hVKeyCombo, CB_ADDSTRING, 0, (LPARAM)vk.first.c_str());
+        SendMessageW(hVKeyCombo, CB_SETITEMDATA, index, (LPARAM)vk.second);
+    }
+
+    // Select current virtual key
+    selectedIndex = 0;
+    // g_hotkeyVKey should always be a valid, non-zero VKey because 'None' is not an option
+    // and it defaults to DEFAULT_HOTKEY_VKEY if not found in INI.
+    for (size_t i = 0; i < vkeys_data.size(); ++i) {
+        if (vkeys_data[i].second == g_hotkeyVKey) {
+            selectedIndex = i;
+            break;
+        }
+    }
+    SendMessageW(hVKeyCombo, CB_SETCURSEL, selectedIndex, 0);
+}
+
+
 // Function to reset all settings to their default values
 void ResetToDefaults(HWND hSettingsWnd) {
     // Reset color
@@ -356,22 +586,50 @@ void ResetToDefaults(HWND hSettingsWnd) {
     // Reset pool size
     g_poolSize = DEFAULT_POOL_SIZE;
 
+    // Store current hotkey to try and revert if default fails to register
+    UINT oldMod1 = g_hotkeyMod1;
+    UINT oldMod2 = g_hotkeyMod2;
+    UINT oldVKey = g_hotkeyVKey;
+
+    // Set to default hotkey
+    g_hotkeyMod1 = DEFAULT_HOTKEY_MOD1;
+    g_hotkeyMod2 = DEFAULT_HOTKEY_MOD2;
+    g_hotkeyVKey = DEFAULT_HOTKEY_VKEY; // DEFAULT_HOTKEY_VKEY is guaranteed to be a valid key
+
+    // Unregister and attempt to register the default hotkey
+    UnregisterAppHotkey();
+    // Only show warning if the default hotkey is a valid key and fails to register
+    // g_hotkeyVKey will always be non-zero here
+    if (!RegisterAppHotkey()) {
+        // Revert to the hotkey that was active before reset
+        g_hotkeyMod1 = oldMod1;
+        g_hotkeyMod2 = oldMod2;
+        g_hotkeyVKey = oldVKey;
+        RegisterAppHotkey(); // Re-register the hotkey that was previously working
+        MessageBoxW(hSettingsWnd, L"Failed to register the default hotkey. Reverted to previous hotkey.", L"Hotkey Reset Warning", MB_OK | MB_ICONWARNING);
+    }
+
     // Update settings window controls
     InvalidateRect(hSettingsWnd, nullptr, TRUE); // Redraw color preview
     UpdateWindow(hSettingsWnd);
     SendMessage(GetDlgItem(hSettingsWnd, IDC_POOL_SIZE_SLIDER), TBM_SETPOS, (WPARAM)TRUE, (LPARAM)g_poolSize);
     UpdatePoolSizeDisplay(hSettingsWnd);
 
+    // Update hotkey dropdowns and display (after potential rollback)
+    PopulateHotkeyDropdowns(hSettingsWnd); // Re-populate to reset selections
+    UpdateHotkeyDisplay(hSettingsWnd);
+
+
     // Update main grid
-    GenerateCells(); 
-    FilterCells();   
+    GenerateCells();
+    FilterCells();
     if (g_hGridWnd) {
         LayoutAndDraw(g_hGridWnd, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
         InvalidateRect(g_hGridWnd, nullptr, TRUE);
         UpdateWindow(g_hGridWnd);
     }
 
-    // Save the reset settings
+    // Save the (potentially reset or reverted) settings
     SaveSettings();
 }
 
@@ -387,10 +645,12 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
             const int labelWidth = 150;
             const int previewWidth = 50;
             const int previewHeight = 25;
-            const int buttonWidth = 140; 
+            const int buttonWidth = 140;
             const int controlSpacing = 10;
             const int sliderWidth = 180;
-            const int sliderHeight = 30; 
+            const int sliderHeight = 30;
+            const int comboWidth = 100;
+            const int comboHeight = 200; // Height for dropdown list
 
             int currentY = padding;
 
@@ -399,7 +659,7 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
             CreateWindowW(
                 L"STATIC", L"Current Cell Color:",
                 WS_CHILD | WS_VISIBLE | SS_LEFT,
-                padding, currentY + (controlHeight - 20) / 2, labelWidth, 20, 
+                padding, currentY + (controlHeight - 20) / 2, labelWidth, 20,
                 hWnd, (HMENU)IDC_COLOR_LABEL, GetModuleHandle(nullptr), nullptr
             );
 
@@ -407,50 +667,97 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
             CreateWindowW(
                 L"BUTTON", L"Choose Color...",
                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                padding + labelWidth + controlSpacing + previewWidth + 20, currentY, buttonWidth, controlHeight, 
+                padding + labelWidth + controlSpacing + previewWidth + 20, currentY, buttonWidth, controlHeight,
                 hWnd, (HMENU)IDC_CHOOSE_COLOR_BUTTON, GetModuleHandle(nullptr), nullptr
             );
-            currentY += controlHeight + padding; 
+            currentY += controlHeight + padding;
 
             // Character Pool Size Settings Section
             // Label for "Number of Characters:"
             CreateWindowW(
                 L"STATIC", L"Number of Characters:",
                 WS_CHILD | WS_VISIBLE | SS_LEFT,
-                padding, currentY + (sliderHeight - 20) / 2, labelWidth + 20, 20, 
+                padding, currentY + (sliderHeight - 20) / 2, labelWidth + 20, 20,
                 hWnd, (HMENU)IDC_POOL_SIZE_LABEL, GetModuleHandle(nullptr), nullptr
             );
 
             // Trackbar (Slider)
             HWND hSlider = CreateWindowExW(
-                0,                                   
-                TRACKBAR_CLASSW,                     
-                L"",                                 
-                WS_CHILD | WS_VISIBLE | TBS_AUTOTICKS | TBS_NOTICKS, 
-                padding + labelWidth + 20 + controlSpacing, currentY, 
-                sliderWidth, sliderHeight,                  
-                hWnd,                                
-                (HMENU)IDC_POOL_SIZE_SLIDER,         
-                GetModuleHandle(nullptr), nullptr    
+                0,
+                TRACKBAR_CLASSW,
+                L"",
+                WS_CHILD | WS_VISIBLE | TBS_AUTOTICKS | TBS_NOTICKS,
+                padding + labelWidth + 20 + controlSpacing, currentY,
+                sliderWidth, sliderHeight,
+                hWnd,
+                (HMENU)IDC_POOL_SIZE_SLIDER,
+                GetModuleHandle(nullptr), nullptr
             );
 
-            SendMessage(hSlider, TBM_SETRANGE, (WPARAM)TRUE, (LPARAM)MAKELONG(MIN_POOL_SIZE, (int)POOL.length())); 
-            SendMessage(hSlider, TBM_SETPOS, (WPARAM)TRUE, (LPARAM)g_poolSize); 
-            SendMessage(hSlider, TBM_SETPAGESIZE, 0, 1); 
-            SendMessage(hSlider, TBM_SETTICFREQ, 1, 0); 
+            SendMessage(hSlider, TBM_SETRANGE, (WPARAM)TRUE, (LPARAM)MAKELONG(MIN_POOL_SIZE, (int)POOL.length()));
+            SendMessage(hSlider, TBM_SETPOS, (WPARAM)TRUE, (LPARAM)g_poolSize);
+            SendMessage(hSlider, TBM_SETPAGESIZE, 0, 1);
+            SendMessage(hSlider, TBM_SETTICFREQ, 1, 0);
 
             currentY += sliderHeight + padding;
 
             // Static text to display current pool size value
             CreateWindowW(
-                L"STATIC", L"", 
+                L"STATIC", L"",
                 WS_CHILD | WS_VISIBLE | SS_LEFT,
-                padding, currentY, labelWidth + sliderWidth, 20, 
-                hWnd, (HMENU)IDC_POOL_SIZE_VALUE_LABEL, GetModuleHandle(nullptr), nullptr 
+                padding, currentY, labelWidth + sliderWidth, 20,
+                hWnd, (HMENU)IDC_POOL_SIZE_VALUE_LABEL, GetModuleHandle(nullptr), nullptr
             );
-            UpdatePoolSizeDisplay(hWnd); 
+            UpdatePoolSizeDisplay(hWnd);
 
             currentY += 20 + padding; // Space after value label
+
+            // Hotkey Settings Section
+            CreateWindowW(
+                L"STATIC", L"Hotkey Combination:",
+                WS_CHILD | WS_VISIBLE | SS_LEFT,
+                padding, currentY + (controlHeight - 20) / 2, labelWidth, 20,
+                hWnd, nullptr, GetModuleHandle(nullptr), nullptr
+            );
+
+            // Modifier 1 Dropdown
+            CreateWindowW(
+                L"COMBOBOX", L"",
+                WS_CHILD | WS_VISIBLE | WS_VSCROLL | CBS_DROPDOWNLIST, // CBS_DROPDOWNLIST makes it non-editable
+                padding + labelWidth + controlSpacing, currentY, comboWidth, comboHeight,
+                hWnd, (HMENU)IDC_HOTKEY_MOD1_COMBO, GetModuleHandle(nullptr), nullptr
+            );
+
+            // Modifier 2 Dropdown
+            CreateWindowW(
+                L"COMBOBOX", L"",
+                WS_CHILD | WS_VISIBLE | WS_VSCROLL | CBS_DROPDOWNLIST,
+                padding + labelWidth + controlSpacing + comboWidth + controlSpacing, currentY, comboWidth, comboHeight,
+                hWnd, (HMENU)IDC_HOTKEY_MOD2_COMBO, GetModuleHandle(nullptr), nullptr
+            );
+
+            // Virtual Key Dropdown
+            CreateWindowW(
+                L"COMBOBOX", L"",
+                WS_CHILD | WS_VISIBLE | WS_VSCROLL | CBS_DROPDOWNLIST,
+                padding + labelWidth + controlSpacing + (comboWidth + controlSpacing) * 2, currentY, comboWidth + 20, comboHeight,
+                hWnd, (HMENU)IDC_HOTKEY_VKEY_COMBO, GetModuleHandle(nullptr), nullptr
+            );
+
+            PopulateHotkeyDropdowns(hWnd); // Populate dropdowns with options
+            currentY += controlHeight + padding;
+
+            // Label to display current hotkey (effective combination)
+            CreateWindowW(
+                L"STATIC", L"",
+                WS_CHILD | WS_VISIBLE | SS_LEFT,
+                padding, currentY, labelWidth + (comboWidth + controlSpacing) * 3 + 20, 20,
+                hWnd, (HMENU)IDC_HOTKEY_DISPLAY_LABEL, GetModuleHandle(nullptr), nullptr
+            );
+            UpdateHotkeyDisplay(hWnd); // Initial update of the hotkey display
+
+            currentY += 20 + padding; // Space after value label
+
 
             // Reset Button (Right-aligned)
             const int resetButtonWidth = 120;
@@ -484,14 +791,14 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
             const int controlSpacing = 10;
 
             int previewX = padding + labelWidth + controlSpacing;
-            int previewY = padding; 
+            int previewY = padding;
             RECT colorPreviewRect = {previewX, previewY, previewX + previewWidth, previewY + previewHeight};
 
             HBRUSH hBrush = CreateSolidBrush(RGB(g_cellColor.GetR(), g_cellColor.GetG(), g_cellColor.GetB()));
             FillRect(hdc, &colorPreviewRect, hBrush);
             DeleteObject(hBrush);
 
-            FrameRect(hdc, &colorPreviewRect, (HBRUSH)GetStockObject(BLACK_BRUSH)); 
+            FrameRect(hdc, &colorPreviewRect, (HBRUSH)GetStockObject(BLACK_BRUSH));
 
             EndPaint(hWnd, &ps);
         }
@@ -499,14 +806,14 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
 
         case WM_COMMAND:
             if (LOWORD(wParam) == IDC_CHOOSE_COLOR_BUTTON) {
-                static COLORREF customColors[16]; 
+                static COLORREF customColors[16];
                 CHOOSECOLOR cc;
                 ZeroMemory(&cc, sizeof(cc));
                 cc.lStructSize = sizeof(cc);
                 cc.hwndOwner = hWnd;
                 cc.lpCustColors = customColors;
-                cc.Flags = CC_RGBINIT | CC_FULLOPEN; 
-                
+                cc.Flags = CC_RGBINIT | CC_FULLOPEN;
+
                 cc.rgbResult = RGB(g_cellColor.GetR(), g_cellColor.GetG(), g_cellColor.GetB());
 
                 if (ChooseColor(&cc)) {
@@ -517,32 +824,78 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
                         UpdateWindow(g_hGridWnd);
                     }
 
-                    InvalidateRect(hWnd, nullptr, TRUE); 
-                    UpdateWindow(hWnd); 
+                    InvalidateRect(hWnd, nullptr, TRUE);
+                    UpdateWindow(hWnd);
 
                     SaveSettings();
                 }
             } else if (LOWORD(wParam) == IDC_RESET_BUTTON) {
                 ResetToDefaults(hWnd); // Call the new reset function
+            } else if (HIWORD(wParam) == CBN_SELCHANGE) { // Handle Combobox selections
+                // Get selected values first
+                int selMod1Index = (int)SendMessage(GetDlgItem(hWnd, IDC_HOTKEY_MOD1_COMBO), CB_GETCURSEL, 0, 0);
+                UINT newMod1 = (UINT)SendMessage(GetDlgItem(hWnd, IDC_HOTKEY_MOD1_COMBO), CB_GETITEMDATA, selMod1Index, 0);
+
+                int selMod2Index = (int)SendMessage(GetDlgItem(hWnd, IDC_HOTKEY_MOD2_COMBO), CB_GETCURSEL, 0, 0);
+                UINT newMod2 = (UINT)SendMessage(GetDlgItem(hWnd, IDC_HOTKEY_MOD2_COMBO), CB_GETITEMDATA, selMod2Index, 0);
+
+                int selVKeyIndex = (int)SendMessage(GetDlgItem(hWnd, IDC_HOTKEY_VKEY_COMBO), CB_GETCURSEL, 0, 0);
+                UINT newVKey = (UINT)SendMessage(GetDlgItem(hWnd, IDC_HOTKEY_VKEY_COMBO), CB_GETITEMDATA, selVKeyIndex, 0);
+
+                // Check if any part of the hotkey has actually changed
+                if (newMod1 != g_hotkeyMod1 || newMod2 != g_hotkeyMod2 || newVKey != g_hotkeyVKey) {
+                    // Store current working hotkey for rollback
+                    UINT oldMod1 = g_hotkeyMod1;
+                    UINT oldMod2 = g_hotkeyMod2;
+                    UINT oldVKey = g_hotkeyVKey;
+
+                    // Update global variables to new selected values
+                    g_hotkeyMod1 = newMod1;
+                    g_hotkeyMod2 = newMod2;
+                    g_hotkeyVKey = newVKey; // newVKey will always be non-zero from UI selection
+
+                    UnregisterAppHotkey(); // Always unregister the old one first
+
+                    // Try to register the new hotkey
+                    // If registration failed (g_hotkeyVKey will always be non-zero here for user selection)
+                    if (!RegisterAppHotkey()) {
+                        // Revert to old hotkey
+                        g_hotkeyMod1 = oldMod1;
+                        g_hotkeyMod2 = oldMod2;
+                        g_hotkeyVKey = oldVKey;
+
+                        // Re-register the old hotkey (it should succeed as it was working before)
+                        RegisterAppHotkey();
+
+                        // Update UI to reflect the reverted hotkey
+                        PopulateHotkeyDropdowns(hWnd); // Re-populate to set correct selection
+                        UpdateHotkeyDisplay(hWnd);
+                        // Do NOT SaveSettings() as the attempt failed and we reverted
+                    } else {
+                        // Hotkey registration succeeded
+                        UpdateHotkeyDisplay(hWnd);
+                        SaveSettings(); // Save the new hotkey
+                    }
+                }
             }
             break;
 
-        case WM_HSCROLL: 
+        case WM_HSCROLL:
             if ((HWND)lParam == GetDlgItem(hWnd, IDC_POOL_SIZE_SLIDER)) {
                 int newPoolSize = (int)SendMessage((HWND)lParam, TBM_GETPOS, 0, 0);
                 if (newPoolSize != g_poolSize) {
                     g_poolSize = newPoolSize;
-                    
-                    UpdatePoolSizeDisplay(hWnd); 
 
-                    GenerateCells(); 
-                    FilterCells();   
+                    UpdatePoolSizeDisplay(hWnd);
+
+                    GenerateCells();
+                    FilterCells();
                     if (g_hGridWnd) {
                         LayoutAndDraw(g_hGridWnd, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
                         InvalidateRect(g_hGridWnd, nullptr, TRUE);
                         UpdateWindow(g_hGridWnd);
                     }
-                    SaveSettings(); 
+                    SaveSettings();
                 }
             }
             break;
@@ -605,7 +958,7 @@ void LoadSettings() {
         ColorToHex(DEFAULT_CELL_COLOR).c_str(), // Use default as fallback
         hexColor,
         sizeof(hexColor) / sizeof(hexColor[0]),
-        g_iniFilePath.c_str() 
+        g_iniFilePath.c_str()
     );
     Gdiplus::Color loadedColor = HexToColor(hexColor);
     if (loadedColor.GetA() != 0) { // Check if conversion was successful (not transparent black default)
@@ -624,6 +977,12 @@ void LoadSettings() {
     // Ensure g_poolSize is within valid range
     if (g_poolSize < MIN_POOL_SIZE) g_poolSize = MIN_POOL_SIZE;
     if (g_poolSize > (int)POOL.length()) g_poolSize = (int)POOL.length();
+
+    // Load Hotkey Modifiers and Virtual Key
+    g_hotkeyMod1 = (UINT)GetPrivateProfileIntW(INI_SECTION, INI_KEY_HOTKEY_MOD1, DEFAULT_HOTKEY_MOD1, g_iniFilePath.c_str());
+    g_hotkeyMod2 = (UINT)GetPrivateProfileIntW(INI_SECTION, INI_KEY_HOTKEY_MOD2, DEFAULT_HOTKEY_MOD2, g_iniFilePath.c_str());
+    g_hotkeyVKey = (UINT)GetPrivateProfileIntW(INI_SECTION, INI_KEY_HOTKEY_VKEY, DEFAULT_HOTKEY_VKEY, g_iniFilePath.c_str());
+    // The explicit check for g_hotkeyVKey == 0 has been removed as per your request.
 }
 
 // Saves current settings to the INI file
@@ -633,18 +992,28 @@ void SaveSettings() {
         INI_SECTION,
         INI_KEY_CELL_COLOR,
         hexColor.c_str(),
-        g_iniFilePath.c_str() 
+        g_iniFilePath.c_str()
     );
 
     // Save Pool Size
-    std::wstringstream ss;
-    ss << g_poolSize;
+    std::wstringstream ssPoolSize;
+    ssPoolSize << g_poolSize;
     WritePrivateProfileStringW(
         INI_SECTION,
         INI_KEY_POOL_SIZE,
-        ss.str().c_str(),
+        ssPoolSize.str().c_str(),
         g_iniFilePath.c_str()
     );
+
+    // Save Hotkey Modifiers and Virtual Key
+    std::wstringstream ssMod1, ssMod2, ssVKey;
+    ssMod1 << g_hotkeyMod1;
+    ssMod2 << g_hotkeyMod2;
+    ssVKey << g_hotkeyVKey;
+
+    WritePrivateProfileStringW(INI_SECTION, INI_KEY_HOTKEY_MOD1, ssMod1.str().c_str(), g_iniFilePath.c_str());
+    WritePrivateProfileStringW(INI_SECTION, INI_KEY_HOTKEY_MOD2, ssMod2.str().c_str(), g_iniFilePath.c_str());
+    WritePrivateProfileStringW(INI_SECTION, INI_KEY_HOTKEY_VKEY, ssVKey.str().c_str(), g_iniFilePath.c_str());
 }
 
 
@@ -652,7 +1021,7 @@ void SaveSettings() {
 void GenerateCells() {
     g_cells.clear();
     // Use g_poolSize to determine how many characters from POOL to use
-    int currentPoolUsedSize = g_poolSize; 
+    int currentPoolUsedSize = g_poolSize;
 
     for (int row = 0; row < currentPoolUsedSize; ++row) {
         wchar_t firstChar = POOL[row];
@@ -711,8 +1080,8 @@ void LayoutAndDraw(HWND hWnd, int W, int H) {
     // Use the global cell color
     SolidBrush cellBrush(g_cellColor);
 
-    Font        font(L"Arial", 11, FontStyleBold);
-    SolidBrush    textBrush(Color(255, 0, 0, 0)); // Text color remains black
+    Font          font(L"Arial", 11, FontStyleBold);
+    SolidBrush      textBrush(Color(255, 0, 0, 0)); // Text color remains black
 
     StringFormat sf;
     sf.SetAlignment(StringAlignmentCenter);
@@ -736,11 +1105,11 @@ void LayoutAndDraw(HWND hWnd, int W, int H) {
             int secondCharIdx = (lbl.length() >= 2) ? (int)POOL.find(lbl[1]) : std::wstring::npos;
             if (secondCharIdx != std::wstring::npos && firstCharIdx < g_poolSize && secondCharIdx < g_poolSize) {
                  c.rc = {
-                    LONG(secondCharIdx * cellW),
-                    LONG(firstCharIdx * cellH),
-                    LONG((secondCharIdx + 1) * cellW),
-                    LONG((firstCharIdx + 1) * cellH)
-                };
+                     LONG(secondCharIdx * cellW),
+                     LONG(firstCharIdx * cellH),
+                     LONG((secondCharIdx + 1) * cellW),
+                     LONG((firstCharIdx + 1) * cellH)
+                 };
             } else { c.rc = { -100, -100, -90, -90 }; } // Mark as invalid
         }
         else if (lbl.length() == 3 && lbl[1] == L'.' && firstCharIdx != std::wstring::npos) { // Dotted label
