@@ -12,10 +12,12 @@
 #include <sstream>      // Required for string stream manipulation
 #include <iomanip>      // Required for std::setw and std::setfill
 #include <commdlg.h>    // Required for ChooseColor
-#include <shlobj.h>     // Required for SHGetFolderPathW (still included for general utility, though not strictly used for INI path in this version)
+#include <shlobj.h>     // Still included for general utility
+#include <commctrl.h>   // Required for trackbar control (INITCOMMONCONTROLSEX)
 
 #pragma comment(lib, "gdiplus.lib")
 #pragma comment(lib, "Shell32.lib") 
+#pragma comment(lib, "ComCtl32.lib") // Link with ComCtl32.lib for trackbar
 
 // --- Constants for System Tray Icon and Menu Items ---
 #define WM_APP_NOTIFYICON (WM_APP + 1)
@@ -27,8 +29,14 @@
 const wchar_t SETTINGS_CLASS_NAME[] = L"SettingsClass";
 #define IDC_COLOR_LABEL         2001
 #define IDC_CHOOSE_COLOR_BUTTON 2003
+#define IDC_POOL_SIZE_LABEL     2004
+#define IDC_POOL_SIZE_SLIDER    2005
+#define IDC_POOL_SIZE_VALUE_LABEL 2006 
+#define IDC_RESET_BUTTON        2007 // New ID for the Reset Button
+
 const wchar_t INI_SECTION[] = L"Settings";
 const wchar_t INI_KEY_CELL_COLOR[] = L"CellColor";
+const wchar_t INI_KEY_POOL_SIZE[] = L"PoolSize"; 
 // --- End Constants ---
 
 HWND            g_hGridWnd  = nullptr;
@@ -36,6 +44,9 @@ HWND            g_hSettingsWnd = nullptr;
 
 // Global variable for the cell color (Default light blue with alpha)
 Gdiplus::Color  g_cellColor(128, 173, 216, 230); // Alpha is 128 (half-transparent)
+// Default values for settings
+const Gdiplus::Color DEFAULT_CELL_COLOR(128, 173, 216, 230); // Same as initial g_cellColor
+const int DEFAULT_POOL_SIZE = 36; // Full POOL.length()
 
 enum GridState  { HIDDEN, SHOW_ALL, WAIT_CLICK } g_state = HIDDEN;
 std::wstring    g_typed;
@@ -44,6 +55,10 @@ std::vector<Cell>     g_cells;
 std::vector<Cell*>    g_filtered;
 const UINT      HOTKEY_ID   = 1;
 const std::wstring POOL     = L"abcdefghijklmnopqrstuvwxyz0123456789";
+
+// New global variable for the pool size, initialized to full pool
+int             g_poolSize = (int)POOL.length(); 
+const int MIN_POOL_SIZE = 6; // Minimum characters (a-f)
 
 // Global variable for the notification icon data
 NOTIFYICONDATAW g_nid = {};
@@ -60,12 +75,14 @@ void    FilterCells();
 void    LayoutAndDraw(HWND, int, int);
 void    MoveToAndPrompt(Cell*);
 void    SimClick(DWORD);
+void    UpdatePoolSizeDisplay(HWND hSettingsWnd); // New helper
 
 // Helper functions for color and settings persistence
 Gdiplus::Color HexToColor(const std::wstring& hex);
 std::wstring ColorToHex(const Gdiplus::Color& color);
 void LoadSettings();
 void SaveSettings();
+void ResetToDefaults(HWND hSettingsWnd); // New function to reset settings
 
 
 // Helper to draw a rounded rectangle with given brush
@@ -82,6 +99,12 @@ void DrawRounded(Gdiplus::Graphics& g, const Gdiplus::RectF& r, Gdiplus::Brush* 
 }
 
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
+    // Initialize Common Controls for Trackbar
+    INITCOMMONCONTROLSEX icc;
+    icc.dwSize = sizeof(icc);
+    icc.dwICC = ICC_BAR_CLASSES; // Trackbar control class
+    InitCommonControlsEx(&icc);
+
     Gdiplus::GdiplusStartupInput gdiplusInput;
     ULONG_PTR token;
     if (Gdiplus::GdiplusStartup(&token, &gdiplusInput, nullptr) != Gdiplus::Ok) {
@@ -99,19 +122,13 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
     if (lastSlash != std::wstring::npos) {
         exeDir = sExePath.substr(0, lastSlash);
     } else {
-        // Fallback: If no slash found, assume current directory
         exeDir = L"."; 
     }
 
     g_iniFilePath = exeDir;
-    g_iniFilePath += L"\\Settings"; // Add the Settings subfolder
-
-    // Create the 'Settings' directory if it doesn't exist.
-    // CreateDirectoryW returns non-zero on success, zero on failure.
-    // Failure might mean it already exists (which is fine), or permission issues.
+    g_iniFilePath += L"\\Settings"; 
     CreateDirectoryW(g_iniFilePath.c_str(), nullptr); 
-
-    g_iniFilePath += L"\\GridOverlaySettings.ini"; // Add the INI filename
+    g_iniFilePath += L"\\GridOverlaySettings.ini"; 
     // --- End custom settings path determination ---
 
     // Load settings at startup
@@ -150,7 +167,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
         nullptr, nullptr, hInst, nullptr
     );
 
-    GenerateCells();
+    GenerateCells(); // Generate cells initially based on loaded settings
     RegisterHotKey(g_hGridWnd, HOTKEY_ID, MOD_ALT, VK_F12);
 
     // --- Tray Icon Initialization ---
@@ -234,9 +251,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                     0,
                     SETTINGS_CLASS_NAME,
                     L"Grid Overlay Settings",
-                    WS_OVERLAPPEDWINDOW | WS_VISIBLE, // Ensure it's visible on creation
+                    WS_OVERLAPPEDWINDOW | WS_VISIBLE, 
                     CW_USEDEFAULT, CW_USEDEFAULT,
-                    400, 150, // Adjusted initial size for better layout
+                    400, 230, // Adjusted initial size to accommodate new button
                     hWnd,
                     nullptr,
                     GetModuleHandle(nullptr),
@@ -321,6 +338,44 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
     return 0;
 }
 
+// Helper to update the text label for pool size display
+void UpdatePoolSizeDisplay(HWND hSettingsWnd) {
+    HWND hLabel = GetDlgItem(hSettingsWnd, IDC_POOL_SIZE_VALUE_LABEL);
+    if (hLabel) {
+        std::wstringstream ss;
+        ss << L"Currently using " << g_poolSize << L" characters.";
+        SetWindowTextW(hLabel, ss.str().c_str());
+    }
+}
+
+// Function to reset all settings to their default values
+void ResetToDefaults(HWND hSettingsWnd) {
+    // Reset color
+    g_cellColor = DEFAULT_CELL_COLOR;
+
+    // Reset pool size
+    g_poolSize = DEFAULT_POOL_SIZE;
+
+    // Update settings window controls
+    InvalidateRect(hSettingsWnd, nullptr, TRUE); // Redraw color preview
+    UpdateWindow(hSettingsWnd);
+    SendMessage(GetDlgItem(hSettingsWnd, IDC_POOL_SIZE_SLIDER), TBM_SETPOS, (WPARAM)TRUE, (LPARAM)g_poolSize);
+    UpdatePoolSizeDisplay(hSettingsWnd);
+
+    // Update main grid
+    GenerateCells(); 
+    FilterCells();   
+    if (g_hGridWnd) {
+        LayoutAndDraw(g_hGridWnd, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
+        InvalidateRect(g_hGridWnd, nullptr, TRUE);
+        UpdateWindow(g_hGridWnd);
+    }
+
+    // Save the reset settings
+    SaveSettings();
+}
+
+
 // Window Procedure for the Settings Window
 LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
@@ -332,28 +387,86 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
             const int labelWidth = 150;
             const int previewWidth = 50;
             const int previewHeight = 25;
-            const int buttonWidth = 140; // Increased width for "Choose Color..."
+            const int buttonWidth = 140; 
             const int controlSpacing = 10;
+            const int sliderWidth = 180;
+            const int sliderHeight = 30; 
 
             int currentY = padding;
 
-            // Create static label "Current Cell Color:"
+            // Color Settings Section
+            // Label for "Current Cell Color:"
             CreateWindowW(
                 L"STATIC", L"Current Cell Color:",
                 WS_CHILD | WS_VISIBLE | SS_LEFT,
-                padding, currentY + (controlHeight - 20) / 2, labelWidth, 20, // Vertically center text
+                padding, currentY + (controlHeight - 20) / 2, labelWidth, 20, 
                 hWnd, (HMENU)IDC_COLOR_LABEL, GetModuleHandle(nullptr), nullptr
             );
 
-            currentY += controlHeight + padding; // Move to the next row
-
-            // Create "Choose Color..." button
+            // "Choose Color..." button
             CreateWindowW(
                 L"BUTTON", L"Choose Color...",
                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                padding, currentY, buttonWidth, controlHeight,
+                padding + labelWidth + controlSpacing + previewWidth + 20, currentY, buttonWidth, controlHeight, 
                 hWnd, (HMENU)IDC_CHOOSE_COLOR_BUTTON, GetModuleHandle(nullptr), nullptr
             );
+            currentY += controlHeight + padding; 
+
+            // Character Pool Size Settings Section
+            // Label for "Number of Characters:"
+            CreateWindowW(
+                L"STATIC", L"Number of Characters:",
+                WS_CHILD | WS_VISIBLE | SS_LEFT,
+                padding, currentY + (sliderHeight - 20) / 2, labelWidth + 20, 20, 
+                hWnd, (HMENU)IDC_POOL_SIZE_LABEL, GetModuleHandle(nullptr), nullptr
+            );
+
+            // Trackbar (Slider)
+            HWND hSlider = CreateWindowExW(
+                0,                                   
+                TRACKBAR_CLASSW,                     
+                L"",                                 
+                WS_CHILD | WS_VISIBLE | TBS_AUTOTICKS | TBS_NOTICKS, 
+                padding + labelWidth + 20 + controlSpacing, currentY, 
+                sliderWidth, sliderHeight,                  
+                hWnd,                                
+                (HMENU)IDC_POOL_SIZE_SLIDER,         
+                GetModuleHandle(nullptr), nullptr    
+            );
+
+            SendMessage(hSlider, TBM_SETRANGE, (WPARAM)TRUE, (LPARAM)MAKELONG(MIN_POOL_SIZE, (int)POOL.length())); 
+            SendMessage(hSlider, TBM_SETPOS, (WPARAM)TRUE, (LPARAM)g_poolSize); 
+            SendMessage(hSlider, TBM_SETPAGESIZE, 0, 1); 
+            SendMessage(hSlider, TBM_SETTICFREQ, 1, 0); 
+
+            currentY += sliderHeight + padding;
+
+            // Static text to display current pool size value
+            CreateWindowW(
+                L"STATIC", L"", 
+                WS_CHILD | WS_VISIBLE | SS_LEFT,
+                padding, currentY, labelWidth + sliderWidth, 20, 
+                hWnd, (HMENU)IDC_POOL_SIZE_VALUE_LABEL, GetModuleHandle(nullptr), nullptr 
+            );
+            UpdatePoolSizeDisplay(hWnd); 
+
+            currentY += 20 + padding; // Space after value label
+
+            // Reset Button (Right-aligned)
+            const int resetButtonWidth = 120;
+            const int resetButtonHeight = 28;
+            int windowWidth;
+            RECT clientRect;
+            GetClientRect(hWnd, &clientRect);
+            windowWidth = clientRect.right - clientRect.left;
+
+            CreateWindowW(
+                L"BUTTON", L"Reset to Defaults",
+                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                windowWidth - padding - resetButtonWidth, currentY, resetButtonWidth, resetButtonHeight,
+                hWnd, (HMENU)IDC_RESET_BUTTON, GetModuleHandle(nullptr), nullptr
+            );
+
         }
         break;
 
@@ -362,7 +475,7 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
             PAINTSTRUCT ps;
             HDC hdc = BeginPaint(hWnd, &ps);
 
-            // Define the preview rect using the same layout constants
+            // Redraw the color preview rectangle
             const int padding = 20;
             const int controlHeight = 25;
             const int labelWidth = 150;
@@ -370,17 +483,14 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
             const int previewHeight = 25;
             const int controlSpacing = 10;
 
-            int currentY_for_preview_row = padding; // This is the Y-coordinate of the row containing the label and preview
             int previewX = padding + labelWidth + controlSpacing;
-            int previewY = currentY_for_preview_row; // Top of the preview rect
+            int previewY = padding; 
             RECT colorPreviewRect = {previewX, previewY, previewX + previewWidth, previewY + previewHeight};
 
-            // Draw the color preview rectangle
             HBRUSH hBrush = CreateSolidBrush(RGB(g_cellColor.GetR(), g_cellColor.GetG(), g_cellColor.GetB()));
             FillRect(hdc, &colorPreviewRect, hBrush);
             DeleteObject(hBrush);
 
-            // Draw a border around it for visual separation
             FrameRect(hdc, &colorPreviewRect, (HBRUSH)GetStockObject(BLACK_BRUSH)); 
 
             EndPaint(hWnd, &ps);
@@ -389,33 +499,50 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
 
         case WM_COMMAND:
             if (LOWORD(wParam) == IDC_CHOOSE_COLOR_BUTTON) {
-                static COLORREF customColors[16]; // Stores custom colors
+                static COLORREF customColors[16]; 
                 CHOOSECOLOR cc;
                 ZeroMemory(&cc, sizeof(cc));
                 cc.lStructSize = sizeof(cc);
                 cc.hwndOwner = hWnd;
                 cc.lpCustColors = customColors;
-                cc.Flags = CC_RGBINIT | CC_FULLOPEN; // CC_RGBINIT uses initial color, CC_FULLOPEN shows custom color controls
+                cc.Flags = CC_RGBINIT | CC_FULLOPEN; 
                 
-                // Initialize with current color (Gdiplus::Color to COLORREF)
                 cc.rgbResult = RGB(g_cellColor.GetR(), g_cellColor.GetG(), g_cellColor.GetB());
 
                 if (ChooseColor(&cc)) {
-                    // Update global color, preserving alpha
                     g_cellColor = Gdiplus::Color(g_cellColor.GetA(), GetRValue(cc.rgbResult), GetGValue(cc.rgbResult), GetBValue(cc.rgbResult));
 
-                    // Redraw the main grid window to show new color
                     if (g_hGridWnd) {
                         InvalidateRect(g_hGridWnd, nullptr, TRUE);
                         UpdateWindow(g_hGridWnd);
                     }
 
-                    // Redraw the settings window to update the color preview
                     InvalidateRect(hWnd, nullptr, TRUE); 
                     UpdateWindow(hWnd); 
 
-                    // Save the new setting immediately
                     SaveSettings();
+                }
+            } else if (LOWORD(wParam) == IDC_RESET_BUTTON) {
+                ResetToDefaults(hWnd); // Call the new reset function
+            }
+            break;
+
+        case WM_HSCROLL: 
+            if ((HWND)lParam == GetDlgItem(hWnd, IDC_POOL_SIZE_SLIDER)) {
+                int newPoolSize = (int)SendMessage((HWND)lParam, TBM_GETPOS, 0, 0);
+                if (newPoolSize != g_poolSize) {
+                    g_poolSize = newPoolSize;
+                    
+                    UpdatePoolSizeDisplay(hWnd); 
+
+                    GenerateCells(); 
+                    FilterCells();   
+                    if (g_hGridWnd) {
+                        LayoutAndDraw(g_hGridWnd, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
+                        InvalidateRect(g_hGridWnd, nullptr, TRUE);
+                        UpdateWindow(g_hGridWnd);
+                    }
+                    SaveSettings(); 
                 }
             }
             break;
@@ -475,28 +602,48 @@ void LoadSettings() {
     GetPrivateProfileStringW(
         INI_SECTION,
         INI_KEY_CELL_COLOR,
-        L"ADDAE6", // Default hex for our light blue
+        ColorToHex(DEFAULT_CELL_COLOR).c_str(), // Use default as fallback
         hexColor,
         sizeof(hexColor) / sizeof(hexColor[0]),
-        g_iniFilePath.c_str() // Use the determined INI file path
+        g_iniFilePath.c_str() 
     );
-
     Gdiplus::Color loadedColor = HexToColor(hexColor);
-
-    if (loadedColor.GetA() != 0) {
+    if (loadedColor.GetA() != 0) { // Check if conversion was successful (not transparent black default)
         g_cellColor = Gdiplus::Color(g_cellColor.GetA(), loadedColor.GetR(), loadedColor.GetG(), loadedColor.GetB());
+    } else {
+        g_cellColor = DEFAULT_CELL_COLOR; // Fallback to default if INI value invalid
     }
+
+    // Load Pool Size
+    g_poolSize = (int)GetPrivateProfileIntW(
+        INI_SECTION,
+        INI_KEY_POOL_SIZE,
+        DEFAULT_POOL_SIZE, // Use default as fallback
+        g_iniFilePath.c_str()
+    );
+    // Ensure g_poolSize is within valid range
+    if (g_poolSize < MIN_POOL_SIZE) g_poolSize = MIN_POOL_SIZE;
+    if (g_poolSize > (int)POOL.length()) g_poolSize = (int)POOL.length();
 }
 
 // Saves current settings to the INI file
 void SaveSettings() {
     std::wstring hexColor = ColorToHex(g_cellColor);
-
     WritePrivateProfileStringW(
         INI_SECTION,
         INI_KEY_CELL_COLOR,
         hexColor.c_str(),
-        g_iniFilePath.c_str() // Use the determined INI file path
+        g_iniFilePath.c_str() 
+    );
+
+    // Save Pool Size
+    std::wstringstream ss;
+    ss << g_poolSize;
+    WritePrivateProfileStringW(
+        INI_SECTION,
+        INI_KEY_POOL_SIZE,
+        ss.str().c_str(),
+        g_iniFilePath.c_str()
     );
 }
 
@@ -504,11 +651,12 @@ void SaveSettings() {
 // Generate cells with double columns, right side with dot inserted after first char
 void GenerateCells() {
     g_cells.clear();
-    int poolSize = (int)POOL.size();
+    // Use g_poolSize to determine how many characters from POOL to use
+    int currentPoolUsedSize = g_poolSize; 
 
-    for (int row = 0; row < poolSize; ++row) {
+    for (int row = 0; row < currentPoolUsedSize; ++row) {
         wchar_t firstChar = POOL[row];
-        for (int col = 0; col < poolSize; ++col) {
+        for (int col = 0; col < currentPoolUsedSize; ++col) {
             wchar_t secondChar = POOL[col];
 
             // Left half (normal)
@@ -571,49 +719,46 @@ void LayoutAndDraw(HWND hWnd, int W, int H) {
     sf.SetLineAlignment(StringAlignmentCenter);
     sf.SetFormatFlags(StringFormatFlagsNoWrap);
 
-    int count = (int)g_filtered.size();
+    // Dynamic grid dimensions based on g_poolSize
+    int rows = g_poolSize;
+    int cols = g_poolSize * 2; // Still two columns (normal + dotted)
 
-    if (count > 1) {
-        int rows = (int)POOL.size();
-        int cols = (int)POOL.size() * 2;
+    float cellW = (float)W / cols;
+    float cellH = (float)H / rows;
 
-        float cellW = (float)W / cols;
-        float cellH = (float)H / rows;
+    // Recalculate cell positions based on the current g_poolSize
+    // This is crucial because GenerateCells now creates a different number of cells.
+    for (auto& c : g_cells) {
+        std::wstring lbl = c.lbl;
+        int firstCharIdx = (lbl.length() >= 1) ? (int)POOL.find(lbl[0]) : std::wstring::npos;
 
-        for (auto c : g_filtered) {
-            std::wstring lbl = c->lbl;
-            if (lbl.length() == 2) {
-                wchar_t first = lbl[0];
-                wchar_t second = lbl[1];
-                int row = (int)POOL.find(first);
-                int col = (int)POOL.find(second);
-                RECT rc = {
-                    LONG(col * cellW),
-                    LONG(row * cellH),
-                    LONG((col + 1) * cellW),
-                    LONG((row + 1) * cellH)
+        if (lbl.length() == 2 && firstCharIdx != std::wstring::npos) { // Normal two-character label
+            int secondCharIdx = (lbl.length() >= 2) ? (int)POOL.find(lbl[1]) : std::wstring::npos;
+            if (secondCharIdx != std::wstring::npos && firstCharIdx < g_poolSize && secondCharIdx < g_poolSize) {
+                 c.rc = {
+                    LONG(secondCharIdx * cellW),
+                    LONG(firstCharIdx * cellH),
+                    LONG((secondCharIdx + 1) * cellW),
+                    LONG((firstCharIdx + 1) * cellH)
                 };
-                c->rc = rc;
-            }
-            else if (lbl.length() == 3 && lbl[1] == L'.') {
-                wchar_t first = lbl[0];
-                wchar_t second = lbl[2];
-                int row = (int)POOL.find(first);
-                int col = (int)POOL.find(second) + (int)POOL.size();
-                RECT rc = {
-                    LONG(col * cellW),
-                    LONG(row * cellH),
-                    LONG((col + 1) * cellW),
-                    LONG((row + 1) * cellH) // FIX: Corrected from (col + 1) * cellH
+            } else { c.rc = { -100, -100, -90, -90 }; } // Mark as invalid
+        }
+        else if (lbl.length() == 3 && lbl[1] == L'.' && firstCharIdx != std::wstring::npos) { // Dotted label
+            int secondCharIdx = (lbl.length() >= 3) ? (int)POOL.find(lbl[2]) : std::wstring::npos;
+            if (secondCharIdx != std::wstring::npos && firstCharIdx < g_poolSize && secondCharIdx < g_poolSize) {
+                c.rc = {
+                    LONG((secondCharIdx + g_poolSize) * cellW), // Shifted by g_poolSize for the right column
+                    LONG(firstCharIdx * cellH),
+                    LONG(((secondCharIdx + g_poolSize) + 1) * cellW),
+                    LONG((firstCharIdx + 1) * cellH)
                 };
-                c->rc = rc;
-            }
-            else {
-                RECT rc = { -100, -100, -90, -90 };
-                c->rc = rc;
-            }
+            } else { c.rc = { -100, -100, -90, -90 }; } // Mark as invalid
+        }
+        else {
+            c.rc = { -100, -100, -90, -90 }; // Mark as invalid
         }
     }
+
 
     for (auto c : g_filtered) {
         if (c->rc.left >= 0 && c->rc.top >= 0) {
