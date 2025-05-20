@@ -168,7 +168,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
     );
 
     GenerateCells(); // Generate cells initially based on loaded settings
-    RegisterHotKey(g_hGridWnd, HOTKEY_ID, MOD_ALT, VK_F12);
+    RegisterHotKey(g_hGridWnd, HOTKEY_ID, MOD_WIN | MOD_SHIFT, 'Z');
 
     // --- Tray Icon Initialization ---
     g_nid.cbSize = sizeof(NOTIFYICONDATAW);
