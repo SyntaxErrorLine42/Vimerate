@@ -8,11 +8,14 @@
 #include <string>
 #include <cmath>
 #include <shellapi.h> // Required for Shell_NotifyIcon
-#include <fstream>    // Required for file operations (INI)
-#include <sstream>    // Required for string stream manipulation
-#include <iomanip>    // Required for std::setw and std::setfill
+#include <fstream>      // Required for file operations (INI)
+#include <sstream>      // Required for string stream manipulation
+#include <iomanip>      // Required for std::setw and std::setfill
+#include <commdlg.h>    // Required for ChooseColor
+#include <shlobj.h>     // Required for SHGetFolderPathW (still included for general utility, though not strictly used for INI path in this version)
 
 #pragma comment(lib, "gdiplus.lib")
+#pragma comment(lib, "Shell32.lib") 
 
 // --- Constants for System Tray Icon and Menu Items ---
 #define WM_APP_NOTIFYICON (WM_APP + 1)
@@ -22,10 +25,8 @@
 
 // --- Constants and IDs for Settings Window Controls ---
 const wchar_t SETTINGS_CLASS_NAME[] = L"SettingsClass";
-#define IDC_COLOR_LABEL     2001
-#define IDC_COLOR_HEX_EDIT  2002
-#define IDC_APPLY_BUTTON    2003
-const wchar_t SETTINGS_INI_FILE[] = L"GridOverlaySettings.ini";
+#define IDC_COLOR_LABEL         2001
+#define IDC_CHOOSE_COLOR_BUTTON 2003
 const wchar_t INI_SECTION[] = L"Settings";
 const wchar_t INI_KEY_CELL_COLOR[] = L"CellColor";
 // --- End Constants ---
@@ -34,7 +35,7 @@ HWND            g_hGridWnd  = nullptr;
 HWND            g_hSettingsWnd = nullptr;
 
 // Global variable for the cell color (Default light blue with alpha)
-Gdiplus::Color  g_cellColor(128, 173, 216, 230);
+Gdiplus::Color  g_cellColor(128, 173, 216, 230); // Alpha is 128 (half-transparent)
 
 enum GridState  { HIDDEN, SHOW_ALL, WAIT_CLICK } g_state = HIDDEN;
 std::wstring    g_typed;
@@ -46,6 +47,10 @@ const std::wstring POOL     = L"abcdefghijklmnopqrstuvwxyz0123456789";
 
 // Global variable for the notification icon data
 NOTIFYICONDATAW g_nid = {};
+
+// Global variable for the full INI file path
+std::wstring g_iniFilePath;
+
 
 // Forward declarations
 LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
@@ -71,7 +76,7 @@ void DrawRounded(Gdiplus::Graphics& g, const Gdiplus::RectF& r, Gdiplus::Brush* 
     path.AddArc(r.X,           r.Y,           radius, radius, 180, 90);
     path.AddArc(r.X + r.Width - radius, r.Y,           radius, radius, 270, 90);
     path.AddArc(r.X + r.Width - radius, r.Y + r.Height - radius, radius, radius,   0, 90);
-    path.AddArc(r.X,           r.Y + r.Height - radius, radius, radius,  90, 90);
+    path.AddArc(r.X,           r.Y + r.Height - radius, radius, radius,   90, 90);
     path.CloseFigure();
     g.FillPath(brush, &path);
 }
@@ -83,6 +88,31 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
         MessageBoxA(nullptr, "Failed to initialize GDI+.", "Error", MB_OK);
         return 1;
     }
+
+    // --- Determine and create path for settings file next to EXE in a 'Settings' subfolder ---
+    wchar_t exePath[MAX_PATH];
+    GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+
+    std::wstring sExePath = exePath;
+    size_t lastSlash = sExePath.rfind(L'\\');
+    std::wstring exeDir;
+    if (lastSlash != std::wstring::npos) {
+        exeDir = sExePath.substr(0, lastSlash);
+    } else {
+        // Fallback: If no slash found, assume current directory
+        exeDir = L"."; 
+    }
+
+    g_iniFilePath = exeDir;
+    g_iniFilePath += L"\\Settings"; // Add the Settings subfolder
+
+    // Create the 'Settings' directory if it doesn't exist.
+    // CreateDirectoryW returns non-zero on success, zero on failure.
+    // Failure might mean it already exists (which is fine), or permission issues.
+    CreateDirectoryW(g_iniFilePath.c_str(), nullptr); 
+
+    g_iniFilePath += L"\\GridOverlaySettings.ini"; // Add the INI filename
+    // --- End custom settings path determination ---
 
     // Load settings at startup
     LoadSettings();
@@ -107,7 +137,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
     wcSettings.lpfnWndProc = SettingsWndProc;
     wcSettings.hInstance = hInst;
     wcSettings.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    wcSettings.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+    wcSettings.hbrBackground = (HBRUSH)GetStockObject(WHITE_BRUSH); // Set background to white
     wcSettings.lpszClassName = SETTINGS_CLASS_NAME;
     RegisterClassExW(&wcSettings);
     // --- End Register Settings Window Class ---
@@ -149,7 +179,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
 
     // --- Delete Tray Icon before exiting ---
     Shell_NotifyIconW(NIM_DELETE, &g_nid);
-    // --- End Delete Tray Icon ---
+    // --- End Tray Icon ---
 
     Gdiplus::GdiplusShutdown(token);
     return 0;
@@ -203,10 +233,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                 g_hSettingsWnd = CreateWindowExW(
                     0,
                     SETTINGS_CLASS_NAME,
-                    L"Settings",
-                    WS_OVERLAPPEDWINDOW,
+                    L"Grid Overlay Settings",
+                    WS_OVERLAPPEDWINDOW | WS_VISIBLE, // Ensure it's visible on creation
                     CW_USEDEFAULT, CW_USEDEFAULT,
-                    400, 300,
+                    400, 150, // Adjusted initial size for better layout
                     hWnd,
                     nullptr,
                     GetModuleHandle(nullptr),
@@ -214,8 +244,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                 );
 
                 if (g_hSettingsWnd) {
-                    ShowWindow(g_hSettingsWnd, SW_SHOW);
-                    UpdateWindow(g_hSettingsWnd);
+                    // Controls are created in WM_CREATE of SettingsWndProc
                 }
             } else {
                 SetForegroundWindow(g_hSettingsWnd);
@@ -297,66 +326,96 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
     switch (message) {
         case WM_CREATE:
         {
-            // Create static label
+            // Define spacing and control dimensions
+            const int padding = 20;
+            const int controlHeight = 25;
+            const int labelWidth = 150;
+            const int previewWidth = 50;
+            const int previewHeight = 25;
+            const int buttonWidth = 140; // Increased width for "Choose Color..."
+            const int controlSpacing = 10;
+
+            int currentY = padding;
+
+            // Create static label "Current Cell Color:"
             CreateWindowW(
-                L"STATIC", L"Cell Color (Hex RRGGBB):",
-                WS_CHILD | WS_VISIBLE,
-                10, 10, 150, 20,
+                L"STATIC", L"Current Cell Color:",
+                WS_CHILD | WS_VISIBLE | SS_LEFT,
+                padding, currentY + (controlHeight - 20) / 2, labelWidth, 20, // Vertically center text
                 hWnd, (HMENU)IDC_COLOR_LABEL, GetModuleHandle(nullptr), nullptr
             );
 
-            // Create edit control for hex input
-            HWND hEdit = CreateWindowW(
-                L"EDIT", ColorToHex(g_cellColor).c_str(), // Initialize with current color
-                WS_CHILD | WS_VISIBLE | WS_BORDER | ES_UPPERCASE | ES_NOHIDESEL, // Removed ES_AUTOHEX
-                170, 10, 100, 20,
-                hWnd, (HMENU)IDC_COLOR_HEX_EDIT, GetModuleHandle(nullptr), nullptr
-            );
-            // Limit text to 6 characters (RRGGBB)
-            SendMessage(hEdit, EM_SETLIMITTEXT, 6, 0);
+            currentY += controlHeight + padding; // Move to the next row
 
-
-            // Create Apply button
+            // Create "Choose Color..." button
             CreateWindowW(
-                L"BUTTON", L"Apply",
+                L"BUTTON", L"Choose Color...",
                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                280, 10, 80, 25,
-                hWnd, (HMENU)IDC_APPLY_BUTTON, GetModuleHandle(nullptr), nullptr
+                padding, currentY, buttonWidth, controlHeight,
+                hWnd, (HMENU)IDC_CHOOSE_COLOR_BUTTON, GetModuleHandle(nullptr), nullptr
             );
         }
         break;
 
+        case WM_PAINT:
+        {
+            PAINTSTRUCT ps;
+            HDC hdc = BeginPaint(hWnd, &ps);
+
+            // Define the preview rect using the same layout constants
+            const int padding = 20;
+            const int controlHeight = 25;
+            const int labelWidth = 150;
+            const int previewWidth = 50;
+            const int previewHeight = 25;
+            const int controlSpacing = 10;
+
+            int currentY_for_preview_row = padding; // This is the Y-coordinate of the row containing the label and preview
+            int previewX = padding + labelWidth + controlSpacing;
+            int previewY = currentY_for_preview_row; // Top of the preview rect
+            RECT colorPreviewRect = {previewX, previewY, previewX + previewWidth, previewY + previewHeight};
+
+            // Draw the color preview rectangle
+            HBRUSH hBrush = CreateSolidBrush(RGB(g_cellColor.GetR(), g_cellColor.GetG(), g_cellColor.GetB()));
+            FillRect(hdc, &colorPreviewRect, hBrush);
+            DeleteObject(hBrush);
+
+            // Draw a border around it for visual separation
+            FrameRect(hdc, &colorPreviewRect, (HBRUSH)GetStockObject(BLACK_BRUSH)); 
+
+            EndPaint(hWnd, &ps);
+        }
+        break;
+
         case WM_COMMAND:
-            if (LOWORD(wParam) == IDC_APPLY_BUTTON) {
-                // Get text from the edit control
-                HWND hEdit = GetDlgItem(hWnd, IDC_COLOR_HEX_EDIT);
-                int textLength = GetWindowTextLength(hEdit);
-                if (textLength == 6) { // Check for exactly 6 characters
-                    std::wstring hexColor(textLength + 1, L'\0');
-                    GetWindowTextW(hEdit, &hexColor[0], textLength + 1);
-                    hexColor.resize(textLength); // Trim null terminator
+            if (LOWORD(wParam) == IDC_CHOOSE_COLOR_BUTTON) {
+                static COLORREF customColors[16]; // Stores custom colors
+                CHOOSECOLOR cc;
+                ZeroMemory(&cc, sizeof(cc));
+                cc.lStructSize = sizeof(cc);
+                cc.hwndOwner = hWnd;
+                cc.lpCustColors = customColors;
+                cc.Flags = CC_RGBINIT | CC_FULLOPEN; // CC_RGBINIT uses initial color, CC_FULLOPEN shows custom color controls
+                
+                // Initialize with current color (Gdiplus::Color to COLORREF)
+                cc.rgbResult = RGB(g_cellColor.GetR(), g_cellColor.GetG(), g_cellColor.GetB());
 
-                    // Convert hex to color
-                    Gdiplus::Color newColor = HexToColor(hexColor);
+                if (ChooseColor(&cc)) {
+                    // Update global color, preserving alpha
+                    g_cellColor = Gdiplus::Color(g_cellColor.GetA(), GetRValue(cc.rgbResult), GetGValue(cc.rgbResult), GetBValue(cc.rgbResult));
 
-                    // Check if HexToColor returned a valid color (non-zero alpha from our helper)
-                    if (newColor.GetA() != 0) {
-                        // Keep the original alpha (128), only update RGB
-                        g_cellColor = Gdiplus::Color(g_cellColor.GetA(), newColor.GetR(), newColor.GetG(), newColor.GetB());
-
-                        // Trigger redraw of the main grid window
-                        if (g_hGridWnd) {
-                            InvalidateRect(g_hGridWnd, nullptr, TRUE);
-                            UpdateWindow(g_hGridWnd);
-                        }
-
-                        // Save the new setting immediately
-                        SaveSettings();
-                    } else {
-                         MessageBoxW(hWnd, L"Invalid hex color format. Please use RRGGBB (e.g., AADD22).", L"Input Error", MB_OK | MB_ICONWARNING);
+                    // Redraw the main grid window to show new color
+                    if (g_hGridWnd) {
+                        InvalidateRect(g_hGridWnd, nullptr, TRUE);
+                        UpdateWindow(g_hGridWnd);
                     }
-                } else {
-                     MessageBoxW(hWnd, L"Invalid hex color format. Please use exactly 6 characters (RRGGBB).", L"Input Error", MB_OK | MB_ICONWARNING);
+
+                    // Redraw the settings window to update the color preview
+                    InvalidateRect(hWnd, nullptr, TRUE); 
+                    UpdateWindow(hWnd); 
+
+                    // Save the new setting immediately
+                    SaveSettings();
                 }
             }
             break;
@@ -386,8 +445,7 @@ Gdiplus::Color HexToColor(const std::wstring& hex) {
     }
 
     if (cleanHex.length() != 6) {
-        // Return transparent black for invalid input
-        return Gdiplus::Color(0, 0, 0, 0);
+        return Gdiplus::Color(0, 0, 0, 0); // Return transparent black for invalid input
     }
 
     try {
@@ -397,7 +455,6 @@ Gdiplus::Color HexToColor(const std::wstring& hex) {
         BYTE b = rgb & 0xFF;
         return Gdiplus::Color(255, r, g, b); // Return with full alpha for valid conversion
     } catch (...) {
-        // Handle parsing errors
         return Gdiplus::Color(0, 0, 0, 0); // Return transparent black on error
     }
 }
@@ -414,40 +471,32 @@ std::wstring ColorToHex(const Gdiplus::Color& color) {
 
 // Loads settings from the INI file
 void LoadSettings() {
-    wchar_t hexColor[10]; // Buffer for the hex string (e.g., "AABBCC\0")
-    // GetPrivateProfileStringW(Section, Key, Default, Buffer, BufferSize, FilePath)
-    DWORD charsRead = GetPrivateProfileStringW(
+    wchar_t hexColor[10];
+    GetPrivateProfileStringW(
         INI_SECTION,
         INI_KEY_CELL_COLOR,
-        L"ADDAE6", // Default hex for our light blue (173, 216, 230)
+        L"ADDAE6", // Default hex for our light blue
         hexColor,
         sizeof(hexColor) / sizeof(hexColor[0]),
-        SETTINGS_INI_FILE
+        g_iniFilePath.c_str() // Use the determined INI file path
     );
 
-    // Convert loaded hex to color and update global variable
     Gdiplus::Color loadedColor = HexToColor(hexColor);
 
-    // If HexToColor returns a valid color (non-zero alpha), use its RGB.
-    // We keep the original alpha (128) from the default color, only changing RGB.
     if (loadedColor.GetA() != 0) {
         g_cellColor = Gdiplus::Color(g_cellColor.GetA(), loadedColor.GetR(), loadedColor.GetG(), loadedColor.GetB());
     }
-    // If the loaded hex was invalid, loadedColor.GetA() would be 0, and we'd stick
-    // with the initial g_cellColor (the default light blue or whatever was set initially).
 }
 
 // Saves current settings to the INI file
 void SaveSettings() {
-    // Convert the current RGB part of the color to hex
     std::wstring hexColor = ColorToHex(g_cellColor);
 
-    // WritePrivateProfileStringW(Section, Key, Value, FilePath)
     WritePrivateProfileStringW(
         INI_SECTION,
         INI_KEY_CELL_COLOR,
         hexColor.c_str(),
-        SETTINGS_INI_FILE
+        g_iniFilePath.c_str() // Use the determined INI file path
     );
 }
 
@@ -496,11 +545,11 @@ void LayoutAndDraw(HWND hWnd, int W, int H) {
     HDC memDC = CreateCompatibleDC(screenDC);
 
     BITMAPINFO bmi = {};
-    bmi.bmiHeader.biSize          = sizeof(BITMAPINFOHEADER);
-    bmi.bmiHeader.biWidth         = W;
-    bmi.bmiHeader.biHeight        = -H;
-    bmi.bmiHeader.biPlanes        = 1;
-    bmi.bmiHeader.biBitCount      = 32;
+    bmi.bmiHeader.biSize            = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth           = W;
+    bmi.bmiHeader.biHeight          = -H;
+    bmi.bmiHeader.biPlanes          = 1;
+    bmi.bmiHeader.biBitCount        = 32;
     bmi.bmiHeader.biCompression = BI_RGB;
 
     void* bits = nullptr;
@@ -555,7 +604,7 @@ void LayoutAndDraw(HWND hWnd, int W, int H) {
                     LONG(col * cellW),
                     LONG(row * cellH),
                     LONG((col + 1) * cellW),
-                    LONG((row + 1) * cellH)
+                    LONG((row + 1) * cellH) // FIX: Corrected from (col + 1) * cellH
                 };
                 c->rc = rc;
             }
