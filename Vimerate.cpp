@@ -2,6 +2,7 @@
 #define UNICODE
 #endif
 
+#include "resource.h"
 #include <windows.h>
 #include <gdiplus.h>
 #include <vector>
@@ -170,6 +171,11 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
     wcGrid.hCursor = LoadCursor(nullptr, IDC_ARROW);
     wcGrid.hbrBackground = (HBRUSH)GetStockObject(NULL_BRUSH);
     wcGrid.lpszClassName = GRID_CLASS_NAME;
+    // Set the large icon (for Alt+Tab, desktop shortcut, etc.)
+    wcGrid.hIcon = LoadIcon(hInst, MAKEINTRESOURCE(IDI_APPICON));
+
+    // Set the small icon (for window title bar, taskbar)
+    wcGrid.hIconSm = LoadIcon(hInst, MAKEINTRESOURCE(IDI_APPICON));
     RegisterClassExW(&wcGrid);
     // --- End Register Main Grid Window Class ---
 
@@ -182,6 +188,8 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
     wcSettings.hCursor = LoadCursor(nullptr, IDC_ARROW);
     wcSettings.hbrBackground = (HBRUSH)GetStockObject(WHITE_BRUSH); // Set background to white
     wcSettings.lpszClassName = SETTINGS_CLASS_NAME;
+    wcSettings.hIcon = LoadIcon(hInst, MAKEINTRESOURCE(IDI_APPICON));   // Large icon
+    wcSettings.hIconSm = LoadIcon(hInst, MAKEINTRESOURCE(IDI_APPICON)); // Small icon
     RegisterClassExW(&wcSettings);
     // --- End Register Settings Window Class ---
 
@@ -202,7 +210,8 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
     g_nid.uID = 1;
     g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     g_nid.uCallbackMessage = WM_APP_NOTIFYICON;
-    g_nid.hIcon = LoadIcon(nullptr, IDI_APPLICATION);
+    // Use your custom icon for the tray as well
+    g_nid.hIcon = LoadIcon(hInst, MAKEINTRESOURCE(IDI_APPICON));
     wcscpy_s(g_nid.szTip, L"Vimerate");
 
     Shell_NotifyIconW(NIM_ADD, &g_nid);
