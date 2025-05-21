@@ -272,6 +272,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                 FilterCells();      // Filter cells (shows all)
                 ShowWindow(hWnd, SW_SHOW); // Show the window
                 LayoutAndDraw(hWnd, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)); // Redraw
+                SetForegroundWindow(hWnd);
+                SetFocus(hWnd); // Fixing a glitch on some desktops
             } else { // If grid is visible, hide it
                 g_state = HIDDEN;      // Set state to hidden
                 ShowWindow(hWnd, SW_HIDE); // Hide the window
