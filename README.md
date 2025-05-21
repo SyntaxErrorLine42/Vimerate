@@ -10,6 +10,9 @@
 Vimerate is a lightning-fast, keyboard-driven screen grid launcher for Windows, built with performance in mind using native C++ and Win32 APIs. Whether you're a die-hard terminal user, a Vim/Neovim fan, or just someone who values speed and efficiency, Vimerate delivers a responsive experience that blends seamlessly with your setup.
 
 ---
+![image](https://github.com/user-attachments/assets/027610da-5a11-49fc-b930-ce9943ff4016)
+![image](https://github.com/user-attachments/assets/124e20bc-8d37-4741-a6b0-d965986e420d)
+
 
 ## ✨ Features
 
@@ -59,6 +62,8 @@ From the system tray:
 - 🔄 **Reset Defaults**: Instantly revert to the original configuration.
 
 Settings are saved to an INI file located in `./Settings/VimerateSettings.ini`.
+
+![image](https://github.com/user-attachments/assets/58a56c1f-fa3b-455b-be6b-f45701a38eec)
 
 ---
 
